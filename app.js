@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { downloadGithubArchive } = require('./lib/github');
 const {
     parseEnv,
     validateService,
@@ -272,7 +273,7 @@ async function performDeploy(service) {
         }
         const endpoint = `repos/${service.repo}/tarball/${service.branch}`;
         logs.push('正在下载所选 GitHub 分支。');
-        await runFile(GH_CLI_PATH, ['api', '--header', 'Accept: application/vnd.github+json', '--output', archive, endpoint], { timeout: 5 * 60 * 1000 });
+        await downloadGithubArchive(GH_CLI_PATH, endpoint, archive, { secrets });
         await runFile('tar', ['-xzf', archive, '-C', source, '--strip-components=1'], { timeout: 5 * 60 * 1000 });
         logs.push('正在构建应用镜像。');
         const build = await runFile('docker', [
