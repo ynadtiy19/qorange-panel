@@ -40,6 +40,7 @@
             <nav class="main-nav" aria-label="控制面板导航" role="tablist">
                 <button id="server-tab" class="nav-tab active" type="button" role="tab" aria-selected="true" aria-controls="server-view" data-view="server">服务器信息</button>
                 <button id="projects-tab" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="projects-view" data-view="projects">项目</button>
+                <button id="docker-resources-tab" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="docker-resources-view" data-view="docker-resources">Docker 资源</button>
             </nav>
 
             <section id="server-view" class="dashboard-view" role="tabpanel" aria-labelledby="server-tab">
@@ -117,6 +118,27 @@
                 </div>
                 <div id="services" class="service-list"></div>
                 <p id="empty-services" class="empty-state">还没有服务。导入仓库即可开始。</p>
+            </section>
+
+            <section id="docker-resources-view" class="dashboard-view panel-card services-panel" role="tabpanel" aria-labelledby="docker-resources-tab" hidden>
+                <div class="section-heading">
+                    <div><h2>Docker 资源</h2><p class="muted">查看容器、镜像与卷之间的关系。此页也可操作外部资源；所有删除均需再次确认。</p></div>
+                    <button id="refresh-docker-resources" class="button subtle" type="button">刷新资源</button>
+                </div>
+                <div class="resource-safety-notice">
+                    镜像大小是 Docker 报告的镜像总大小，包含共享层，不代表可回收空间。卷只读展示；面板不提供删除卷的操作，包括 MongoDB 数据卷。
+                    Docker 查询失败时会明确显示不可用，不会将其当作空列表。
+                </div>
+                <p id="docker-resources-status" class="muted" role="status">尚未加载 Docker 资源。</p>
+                <section class="resource-inventory-section">
+                    <h3>容器</h3><div id="docker-container-list" class="resource-inventory-list"></div>
+                </section>
+                <section class="resource-inventory-section">
+                    <h3>镜像</h3><div id="docker-image-list" class="resource-inventory-list"></div>
+                </section>
+                <section class="resource-inventory-section">
+                    <h3>卷（只读）</h3><div id="docker-volume-list" class="resource-inventory-list"></div>
+                </section>
             </section>
 
         </section>

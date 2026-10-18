@@ -145,6 +145,27 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
 .managed-identity strong { font: .82rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .managed-row code { color: #a8b3c0; font: .76rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; text-align: right; }
 .services-panel { margin-top: 0; }
+.resource-safety-notice, .resource-warning { padding: 12px 14px; border: 1px solid #9e6a03; border-radius: 8px; color: #e3b341; background: #2d2208; font-size: .82rem; line-height: 1.5; }
+.resource-inventory-section { margin-top: 22px; }
+.resource-inventory-section > h3 { margin: 0 0 10px; font-size: .92rem; }
+.resource-inventory-list { display: grid; gap: 10px; }
+.resource-card-row { min-width: 0; padding: 14px; border: 1px solid #30363d; border-radius: 9px; background: #0d1117; }
+.resource-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.resource-card-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; min-width: 0; }
+.resource-card-heading strong { overflow-wrap: anywhere; }
+.resource-card-heading code { color: #9da9b7; font-size: .74rem; overflow-wrap: anywhere; text-align: right; }
+.ownership-badge { flex: 0 0 auto; border: 1px solid #30363d; border-radius: 20px; padding: 3px 8px; font-size: .7rem; }
+.ownership-badge.owned { color: #3fb950; border-color: #238636; }
+.ownership-badge.external { color: #e3b341; border-color: #9e6a03; }
+.resource-fields { display: grid; gap: 7px; margin-top: 11px; }
+.resource-field { display: grid; grid-template-columns: minmax(150px, .32fr) minmax(0, 1fr); gap: 10px; padding-top: 7px; border-top: 1px solid #252e39; font-size: .77rem; }
+.resource-field strong { color: #8b98a8; font-weight: 500; }
+.resource-field span { overflow-wrap: anywhere; }
+.resource-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.resource-warning { margin-top: 8px; }
+.resource-readonly { color: #8b98a8; font-size: .77rem; }
+.resource-unavailable { padding: 11px; border-radius: 7px; color: #ff7b72; background: #2b1215; font-size: .82rem; overflow-wrap: anywhere; }
+.resource-empty { padding: 10px 0; }
 
 @media (max-width: 700px) {
     .shell { width: min(1220px, calc(100% - 24px)); margin: 14px auto 30px; }
@@ -168,4 +189,7 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
     .env-row button { justify-self: end; }
     .managed-row { align-items: flex-start; flex-direction: column; }
     .managed-row code { text-align: left; }
+    .resource-card-heading { flex-direction: column; }
+    .resource-card-heading code { text-align: left; }
+    .resource-field { grid-template-columns: 1fr; gap: 4px; }
 }

@@ -18,6 +18,7 @@ let githubClientConfigured = false;
 let availableBranches = [];
 let branchRequestId = 0;
 let devicePollTimer = null;
+let dockerResourcesLoaded = false;
 
 async function request(url, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -312,6 +313,221 @@ async function loadSystem() {
     }
 }
 
+function resourceSize(bytes) {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return 'Docker 未提供';
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+    let value = bytes;
+    let unit = -1;
+    do {
+        value /= 1024;
+        unit += 1;
+    } while (value >= 1024 && unit < units.length - 1);
+    return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${units[unit]}`;
+}
+
+function resourceField(label, value, parent) {
+    const row = document.createElement('div');
+    row.className = 'resource-field';
+    const heading = document.createElement('strong');
+    heading.textContent = label;
+    const detail = document.createElement('span');
+    detail.textContent = value === null || value === undefined || value === '' ? '未知' : String(value);
+    row.append(heading, detail);
+    parent.append(row);
+}
+
+function resourceLabels(labels) {
+    return Object.entries(labels || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '无可展示的安全标签';
+}
+
+function resourceListMessage(list, result, emptyText) {
+    list.replaceChildren();
+    if (!result || !result.available) {
+        const error = document.createElement('p');
+        error.className = 'resource-unavailable';
+        error.textContent = `不可用：${result && result.error ? result.error : '尚未加载'}`;
+        list.append(error);
+        return;
+    }
+    if (!result.items.length) {
+        const empty = document.createElement('p');
+        empty.className = 'muted resource-empty';
+        empty.textContent = emptyText;
+        list.append(empty);
+    }
+}
+
+function resourceCard(title, resource, kind) {
+    const card = document.createElement('article');
+    card.className = 'resource-card-row';
+    const header = document.createElement('div');
+    header.className = 'resource-card-heading';
+    const identity = document.createElement('div');
+    const name = document.createElement('strong');
+    name.textContent = title;
+    const ownership = document.createElement('span');
+    ownership.className = `ownership-badge ${resource.ownership === 'qorange' ? 'owned' : 'external'}`;
+    ownership.textContent = resource.ownership === 'qorange' ? 'QOrange 托管' : '外部 / 非托管';
+    identity.append(name, ownership);
+    const id = document.createElement('code');
+    id.textContent = resource.id || resource.name;
+    header.append(identity, id);
+    const details = document.createElement('div');
+    details.className = 'resource-fields';
+    card.append(header, details);
+    return { card, details, kind };
+}
+
+function resourceActionButton(parent, label, action, id) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = action === 'remove' ? 'button danger' : 'button subtle';
+    button.textContent = label;
+    button.addEventListener('click', () => runDockerResourceAction(parent, action, id));
+    parent.append(button);
+}
+
+function renderDockerResources(resources) {
+    const containers = resources.containers;
+    const images = resources.images;
+    const volumes = resources.volumes;
+    const containerList = $('#docker-container-list');
+    const imageList = $('#docker-image-list');
+    const volumeList = $('#docker-volume-list');
+    resourceListMessage(containerList, containers, '没有容器。');
+    resourceListMessage(imageList, images, '没有镜像。');
+    resourceListMessage(volumeList, volumes, '没有卷。');
+
+    if (containers && containers.available) {
+        for (const container of containers.items) {
+            const item = resourceCard(container.name || '(无名称)', container, 'container');
+            const portMappings = Object.entries(container.ports || {}).flatMap(([port, bindings]) =>
+                (bindings || []).map(binding => `${binding.HostIp || '0.0.0.0'}:${binding.HostPort}->${port}`));
+            const mountDetails = container.mounts.map(mount =>
+                `${mount.type}${mount.name ? ` ${mount.name}` : ''}: ${mount.source || '未知来源'} → ${mount.destination || '未知目标'}${mount.readWrite === null ? '' : mount.readWrite ? '（读写）' : '（只读）'}`);
+            resourceField('状态', container.state, item.details);
+            resourceField('镜像', `${container.image || '未知'} · ${container.imageId}`, item.details);
+            resourceField('端口', portMappings.join('、') || '未映射', item.details);
+            resourceField('容器可写层', resourceSize(container.size.writableBytes), item.details);
+            resourceField('容器根文件系统', resourceSize(container.size.rootFilesystemBytes), item.details);
+            resourceField('挂载', mountDetails.join('；') || '无挂载', item.details);
+            resourceField('安全标签', resourceLabels(container.labels), item.details);
+            if (/(mongo|mongodb|\/data\/mongo_data)/i.test(`${container.name} ${container.image} ${mountDetails.join(' ')}`)) {
+                const warning = document.createElement('p');
+                warning.className = 'resource-warning';
+                warning.textContent = '检测到数据库名称或数据挂载特征。删除容器不会删除卷，但仍可能造成数据库停机或数据不可用；请先核实备份、挂载及依赖。';
+                item.details.append(warning);
+            }
+            const actions = document.createElement('div');
+            actions.className = 'resource-actions';
+            if (container.running) resourceActionButton(actions, '停止', 'stop', container.id);
+            resourceActionButton(actions, '停止并删除容器', 'remove', container.id);
+            item.card.append(actions);
+            containerList.append(item.card);
+        }
+    }
+    if (images && images.available) {
+        for (const image of images.items) {
+            const item = resourceCard(image.tags.join(', ') || '(未标记镜像)', image, 'image');
+            resourceField('镜像 ID', image.id, item.details);
+            resourceField('镜像大小（共享层总计，非可回收量）', resourceSize(image.sizeBytes), item.details);
+            resourceField('摘要', image.digests.join('、') || '无', item.details);
+            resourceField('引用容器', image.referencedBy.map(container => `${container.name} (${container.state}) · ${container.id}`).join('；') || '无', item.details);
+            resourceField('安全标签', resourceLabels(image.labels), item.details);
+            const actions = document.createElement('div');
+            actions.className = 'resource-actions';
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'button danger';
+            remove.textContent = image.referencedBy.length ? '镜像正在被容器引用' : '删除镜像';
+            remove.disabled = image.referencedBy.length > 0;
+            remove.addEventListener('click', () => runDockerResourceAction(actions, 'remove-image', image.id));
+            actions.append(remove);
+            item.card.append(actions);
+            imageList.append(item.card);
+        }
+    }
+    if (volumes && volumes.available) {
+        for (const volume of volumes.items) {
+            const item = resourceCard(volume.name, volume, 'volume');
+            resourceField('驱动 / 范围', `${volume.driver} / ${volume.scope}`, item.details);
+            resourceField('空间用量', resourceSize(volume.sizeBytes), item.details);
+            resourceField('Docker 引用数', volume.refCount === null ? 'Docker 未提供' : volume.refCount, item.details);
+            resourceField('挂载点', volume.mountpoint || 'Docker 未提供', item.details);
+            resourceField('使用容器', volume.usedBy.map(container =>
+                `${container.name} (${container.state}) · ${container.destination || '未知目标'}${container.readWrite === null ? '' : container.readWrite ? '（读写）' : '（只读）'}`).join('；') || '当前没有发现容器关联', item.details);
+            resourceField('安全标签', resourceLabels(volume.labels), item.details);
+            const readOnly = document.createElement('p');
+            readOnly.className = 'resource-readonly';
+            readOnly.textContent = '只读清单：此面板没有卷删除 API，卷及其数据不会随容器删除。';
+            item.details.append(readOnly);
+            volumeList.append(item.card);
+        }
+    }
+
+    const available = [containers, images, volumes].filter(result => result && result.available).length;
+    const sectionCount = [containers, images, volumes].filter(Boolean).length;
+    $('#docker-resources-status').textContent = resources.status === 'available'
+        ? `已加载 ${containers.totalCount} 个容器、${images.totalCount} 个镜像和 ${volumes.totalCount} 个卷。${[containers, images, volumes].some(result => result.truncated) ? '至少一个清单超过 200 项显示上限，已截断；请在主机侧进一步检查。' : ''}大小仅显示 Docker 实际提供的数据。`
+        : `Docker 资源查询部分或全部不可用（${available}/${sectionCount} 个清单可用）。${resources.error || '请检查 Docker 状态和错误详情。'}`;
+}
+
+async function loadDockerResources() {
+    $('#docker-resources-status').textContent = '正在读取 Docker 资源…';
+    try {
+        const resources = await request('/api/docker-resources');
+        renderDockerResources(resources);
+        dockerResourcesLoaded = true;
+    } catch (error) {
+        $('#docker-resources-status').textContent = `无法读取 Docker 资源：${error.message}`;
+        for (const id of ['docker-container-list', 'docker-image-list', 'docker-volume-list']) {
+            const list = $(`#${id}`);
+            list.replaceChildren();
+            const failure = document.createElement('p');
+            failure.className = 'resource-unavailable';
+            failure.textContent = `不可用：${error.message}`;
+            list.append(failure);
+        }
+    }
+}
+
+async function runDockerResourceAction(parent, action, id) {
+    const isImage = action === 'remove-image';
+    const target = isImage ? 'image' : 'container';
+    const effectiveAction = isImage ? 'remove' : action;
+    const prompt = isImage
+        ? `删除镜像 ${id}？这会移除此镜像 ID 的所有标签；只有未被任何（包括已停止）容器引用时才允许。共享层可能仍由其他镜像使用。`
+        : action === 'stop'
+            ? `停止容器 ${id}？这会立即中断该容器内的服务并造成停机。外部容器也可在此页操作。`
+            : `停止并删除容器 ${id}？将删除容器及其可写层；镜像和所有卷（包括匿名卷、MongoDB 数据卷）会保留，但服务会停机。`;
+    if (!window.confirm(prompt)) return;
+    const confirmation = window.prompt(`为确认，请输入完整的 ${target} ID：\n${id}`);
+    if (confirmation === null) return;
+    if (confirmation.trim() !== id) {
+        showNotice('确认 ID 不匹配，未执行操作。', true);
+        return;
+    }
+    const buttons = parent.querySelectorAll('button');
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+        const result = await request(`/api/docker-resources/${isImage ? 'images' : 'containers'}/${encodeURIComponent(id)}/action`, {
+            method: 'POST',
+            body: JSON.stringify({ action: effectiveAction, confirmation: confirmation.trim() })
+        });
+        showNotice(isImage
+            ? `已删除镜像 ${result.imageId}。标签：${(result.removedTags || []).join(', ') || '无'}。`
+            : action === 'remove'
+                ? `已停止并删除容器 ${result.containerId}；关联卷和镜像已保留。`
+                : `已停止容器 ${result.containerId}。`);
+        await loadDockerResources();
+        await loadSystem();
+    } catch (error) {
+        showNotice(`${error.message}${error.code ? ` (${error.code})` : ''}`, true);
+        buttons.forEach(button => { button.disabled = false; });
+    }
+}
+
 function formatDuration(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) return '未知';
     const days = Math.floor(seconds / 86400);
@@ -391,14 +607,16 @@ function renderManagedContainers(containers, dockerStatus) {
 }
 
 function selectView(view) {
-    const selectedView = view === 'projects' ? 'projects' : 'server';
+    const selectedView = ['projects', 'docker-resources'].includes(view) ? view : 'server';
     $('#server-view').hidden = selectedView !== 'server';
     $('#projects-view').hidden = selectedView !== 'projects';
+    $('#docker-resources-view').hidden = selectedView !== 'docker-resources';
     document.querySelectorAll('.nav-tab').forEach(tab => {
         const selected = tab.dataset.view === selectedView;
         tab.classList.toggle('active', selected);
         tab.setAttribute('aria-selected', String(selected));
     });
+    if (selectedView === 'docker-resources' && !dockerResourcesLoaded) loadDockerResources();
 }
 
 function actionButton(label, action, service, className = 'button subtle') {
@@ -504,30 +722,9 @@ async function runAction(action, service) {
             body: JSON.stringify({ action })
         });
         if (action === 'logs') $('#logs-content').textContent = result.logs || '没有日志输出。';
-        else showNotice(action === 'delete'
-            ? result.containerPreserved
-                ? `已移除 ${service.name} 的 QOrange 记录和环境变量；同名非托管容器保持原样。`
-                : `已删除 ${service.name}。`
-            : result.logs || '操作已完成。');
+        else showNotice(action === 'delete' ? `已删除 ${service.name}。` : result.logs || '操作已完成。');
         await loadSystem();
     } catch (error) {
-        if (action === 'delete' && error.code === 'UNOWNED_CONTAINER' &&
-            window.confirm(`检测到同名容器不是由 QOrange 管理。确认后仅移除 ${service.name} 的 QOrange 服务记录和已保存环境变量；不会停止或删除该容器，它会继续运行且之后需要手动管理。继续？`)) {
-            try {
-                const result = await request(`/api/services/${encodeURIComponent(service.id)}/action`, {
-                    method: 'POST',
-                    body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
-                });
-                showNotice(result.containerPreserved
-                    ? `已移除 ${service.name} 的 QOrange 记录和环境变量；同名非托管容器保持原样。`
-                    : `已删除 ${service.name}。`);
-                await loadSystem();
-                return;
-            } catch (retryError) {
-                showNotice(retryError.message, true);
-                return;
-            }
-        }
         if (action === 'logs') $('#logs-content').textContent = error.message;
         else showNotice(error.message, true);
         if (action === 'build') await loadSystem();
@@ -885,7 +1082,8 @@ $('#variable-form').addEventListener('submit', async event => {
     }
 });
 
-$('#refresh').addEventListener('click', loadSystem);
+$('#refresh').addEventListener('click', () => Promise.all([loadSystem(), loadDockerResources()]));
+$('#refresh-docker-resources').addEventListener('click', loadDockerResources);
 document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click', () => selectView(tab.dataset.view)));
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => {
     const dialog = button.closest('dialog');
@@ -911,7 +1109,7 @@ async function showDashboard() {
     dashboard.hidden = false;
     selectView('server');
     showNotice('');
-    await Promise.all([loadSystem(), loadGithubAccounts()]);
+    await Promise.all([loadSystem(), loadGithubAccounts(), loadDockerResources()]);
 }
 
 async function start() {
