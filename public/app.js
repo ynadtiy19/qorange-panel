@@ -6,8 +6,12 @@ const dashboard = $('#dashboard');
 const notice = $('#notice');
 const serviceDialog = $('#service-dialog');
 const logsDialog = $('#logs-dialog');
+const environmentDialog = $('#environment-dialog');
+const variableDialog = $('#variable-dialog');
 let csrfToken = '';
 let editServiceId = null;
+let environmentService = null;
+let editVariableKey = null;
 let repositories = [];
 
 async function request(url, options = {}) {
@@ -161,15 +165,42 @@ function renderServices(services) {
         name.textContent = service.name;
         const status = document.createElement('span');
         status.className = `status ${service.status}`;
-        status.textContent = service.status === 'running' ? '运行中' : service.status === 'stopped' ? '已停止' : service.status === 'uninstalled' ? '未部署' : service.statusRaw;
+        const labels = {
+            running: '运行中',
+            stopped: '已停止',
+            uninstalled: '未部署',
+            deploying: '部署中',
+            failed: '部署失败',
+            missing: '容器不存在'
+        };
+        status.textContent = labels[service.status] || service.statusRaw;
         title.append(name, status);
+        if (['running', 'stopped'].includes(service.status) && service.deploymentStatus === 'failed') {
+            const failed = document.createElement('span');
+            failed.className = 'status failed';
+            failed.textContent = '最近部署失败';
+            title.append(failed);
+        }
         const meta = document.createElement('div');
         meta.className = 'service-meta';
         meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · 端口 ${service.port}` : ''}`;
-        info.append(title, meta);
+        const envMeta = document.createElement('div');
+        envMeta.className = 'service-meta';
+        envMeta.textContent = service.environmentConfigured
+            ? `环境变量：已保存（${service.environmentVariableCount} 项）`
+            : '环境变量：未配置';
+        info.append(title, meta, envMeta);
+        if (service.lastSuccessfulDeploymentAt) {
+            const lastSuccess = document.createElement('div');
+            lastSuccess.className = 'service-meta';
+            lastSuccess.textContent = `上次成功部署：${new Date(service.lastSuccessfulDeploymentAt).toLocaleString()}`;
+            info.append(lastSuccess);
+        }
         const actions = document.createElement('div');
         actions.className = 'service-actions';
-        actions.append(actionButton('构建并部署', 'build', service, 'button primary'));
+        const buildButton = actionButton(service.status === 'deploying' ? '部署中…' : '构建并部署', 'build', service, 'button primary');
+        buildButton.disabled = service.status === 'deploying';
+        actions.append(buildButton);
         if (service.status === 'running') {
             actions.append(actionButton('重启', 'restart', service), actionButton('停止', 'stop', service));
         } else if (service.status === 'stopped') {
@@ -187,15 +218,10 @@ function renderServices(services) {
 
 async function runAction(action, service) {
     if (action === 'environment') {
-        resetServiceDialog();
-        editServiceId = service.id;
-        $('#service-fields').hidden = true;
-        $('#repo').required = false;
-        $('#service-dialog-title').textContent = `替换环境变量 · ${service.name}`;
-        $('#service-dialog-description').textContent = '系统不会读取或显示现有值。请输入完整的新变量列表；留空将清除所有变量。';
-        $('#env-hint').textContent = '仅保存此处输入的变量值，保存后将全部隐藏。';
-        $('#save-service').textContent = '替换环境变量';
-        serviceDialog.showModal();
+        environmentService = service;
+        $('#environment-title').textContent = `环境变量 · ${service.name}`;
+        await loadEnvironmentVariables();
+        environmentDialog.showModal();
         return;
     }
     if (action === 'delete' && !window.confirm(`确定删除 ${service.name} 吗？其托管容器和私有环境变量文件将被移除，仓库源代码和镜像不会受影响。`)) return;
@@ -218,6 +244,78 @@ async function runAction(action, service) {
     } catch (error) {
         if (action === 'logs') $('#logs-content').textContent = error.message;
         else showNotice(error.message, true);
+        if (action === 'build') await loadSystem();
+    }
+}
+
+async function loadEnvironmentVariables() {
+    if (!environmentService) return;
+    try {
+        const result = await request(`/api/services/${encodeURIComponent(environmentService.id)}/env`);
+        const list = $('#environment-variables');
+        list.replaceChildren();
+        $('#environment-empty').hidden = result.variables.length > 0;
+        for (const variable of result.variables) {
+            const row = document.createElement('div');
+            row.className = 'environment-row';
+            row.setAttribute('role', 'row');
+            const key = document.createElement('code');
+            key.textContent = variable.key;
+            key.setAttribute('role', 'cell');
+            const value = document.createElement('span');
+            value.textContent = variable.valuePresent ? variable.maskedValue : '（空值）';
+            value.setAttribute('role', 'cell');
+            const privacy = document.createElement('span');
+            privacy.className = 'privacy-label';
+            privacy.textContent = '私有';
+            privacy.setAttribute('role', 'cell');
+            const actions = document.createElement('div');
+            actions.className = 'environment-actions';
+            actions.setAttribute('role', 'cell');
+            const edit = document.createElement('button');
+            edit.type = 'button';
+            edit.className = 'button subtle';
+            edit.textContent = '更新值';
+            edit.addEventListener('click', () => openVariableDialog(variable.key));
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'button danger';
+            remove.textContent = '删除';
+            remove.addEventListener('click', () => deleteEnvironmentVariable(variable.key));
+            actions.append(edit, remove);
+            row.append(key, value, privacy, actions);
+            list.append(row);
+        }
+    } catch (error) {
+        showNotice(error.message, true);
+        environmentDialog.close();
+    }
+}
+
+function openVariableDialog(key = null) {
+    editVariableKey = key;
+    $('#variable-form').reset();
+    $('#variable-error').textContent = '';
+    $('#variable-dialog-title').textContent = key ? `更新变量 · ${key}` : '添加环境变量';
+    $('#variable-dialog-description').textContent = key
+        ? '当前值不会显示。输入新值后保存；如需保留当前值，请取消。'
+        : '值不会预填或在保存后再次显示。';
+    $('#variable-key').disabled = Boolean(key);
+    $('#variable-key').value = key || '';
+    $('#variable-value').value = '';
+    variableDialog.showModal();
+}
+
+async function deleteEnvironmentVariable(key) {
+    if (!environmentService || !window.confirm(`确定删除环境变量 ${key} 吗？`)) return;
+    try {
+        await request(`/api/services/${encodeURIComponent(environmentService.id)}/env/${encodeURIComponent(key)}`, {
+            method: 'DELETE'
+        });
+        showNotice(`已删除环境变量 ${key}；如需应用到运行中的服务，请重新构建并部署。`);
+        await Promise.all([loadEnvironmentVariables(), loadSystem()]);
+    } catch (error) {
+        showNotice(error.message, true);
     }
 }
 
@@ -273,7 +371,7 @@ $('#service-form').addEventListener('submit', async event => {
     try {
         if (editServiceId) {
             await request(`/api/services/${encodeURIComponent(editServiceId)}/env`, { method: 'PUT', body: JSON.stringify({ env }) });
-            showNotice('环境变量已替换。');
+            showNotice('环境变量已替换；如需应用到运行中的服务，请重新构建并部署。');
         } else {
             const repo = repositories[Number($('#repo').value)];
             if (!repo) throw new Error('请选择一个 GitHub 仓库。');
@@ -301,10 +399,56 @@ $('#service-form').addEventListener('submit', async event => {
     }
 });
 
+$('#add-environment-variable').addEventListener('click', () => openVariableDialog());
+
+$('#replace-all-environment').addEventListener('click', () => {
+    if (!environmentService) return;
+    resetServiceDialog();
+    editServiceId = environmentService.id;
+    $('#service-fields').hidden = true;
+    $('#repo').required = false;
+    $('#service-dialog-title').textContent = `批量替换环境变量 · ${environmentService.name}`;
+    $('#service-dialog-description').textContent = '此操作会完整替换现有变量列表；系统不会读取或显示现有值。留空将清除全部变量。';
+    $('#env-hint').textContent = '请确认输入完整的新变量集合。保存后，值将从界面中清除并再次隐藏。';
+    $('#save-service').textContent = '替换全部变量';
+    environmentDialog.close();
+    serviceDialog.showModal();
+});
+
+$('#variable-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!environmentService) return;
+    const key = $('#variable-key').value.trim();
+    const value = $('#variable-value').value;
+    const saveButton = $('#save-variable');
+    saveButton.disabled = true;
+    $('#variable-error').textContent = '';
+    try {
+        const url = editVariableKey
+            ? `/api/services/${encodeURIComponent(environmentService.id)}/env/${encodeURIComponent(editVariableKey)}`
+            : `/api/services/${encodeURIComponent(environmentService.id)}/env`;
+        await request(url, {
+            method: editVariableKey ? 'PUT' : 'POST',
+            body: JSON.stringify(editVariableKey ? { value } : { key, value })
+        });
+        $('#variable-value').value = '';
+        variableDialog.close();
+        showNotice(editVariableKey
+            ? `已更新环境变量 ${key}；如需应用到运行中的服务，请重新构建并部署。`
+            : `已添加环境变量 ${key}；如需应用到运行中的服务，请重新构建并部署。`);
+        await Promise.all([loadEnvironmentVariables(), loadSystem()]);
+    } catch (error) {
+        $('#variable-error').textContent = error.message;
+    } finally {
+        saveButton.disabled = false;
+    }
+});
+
 $('#refresh').addEventListener('click', loadSystem);
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => {
     const dialog = button.closest('dialog');
     if (dialog === serviceDialog) $('#env-text').value = '';
+    if (dialog === variableDialog) $('#variable-value').value = '';
     dialog.close();
 }));
 

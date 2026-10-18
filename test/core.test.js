@@ -12,6 +12,7 @@ const {
     validateBranch,
     validateServiceId,
     containerName,
+    resolveServiceStatus,
     redactSecrets
 } = require('../lib/core');
 const { createSession, verifySession, verifyPassword } = require('../lib/auth');
@@ -21,6 +22,9 @@ test('parses multiline KEY=VALUE input without splitting values at equals signs'
         PORT: '8080',
         DATABASE_URL: 'mongodb://host/db?x=a=b'
     });
+    const specialKey = parseEnv('__proto__=safe');
+    assert.equal(Object.hasOwn(specialKey, '__proto__'), true);
+    assert.equal(specialKey.__proto__, 'safe');
 });
 
 test('rejects malformed and duplicate environment names without echoing values', () => {
@@ -53,6 +57,15 @@ test('validates repository services, ports, branches, and container identifiers'
 
 test('redacts environment values from output', () => {
     assert.equal(redactSecrets('token=abc and token=abcdef', ['abc', 'abcdef']), 'token=[REDACTED] and token=[REDACTED]');
+});
+
+test('resolves service availability without claiming a missing container is deployed', () => {
+    assert.equal(resolveServiceStatus(null, 'never', false), 'uninstalled');
+    assert.equal(resolveServiceStatus(null, 'deploying', true), 'deploying');
+    assert.equal(resolveServiceStatus(null, 'failed', false), 'failed');
+    assert.equal(resolveServiceStatus(null, 'succeeded', false), 'missing');
+    assert.equal(resolveServiceStatus('Up 2 minutes', 'failed', false), 'running');
+    assert.equal(resolveServiceStatus('Exited (1) 2 minutes ago', 'succeeded', false), 'stopped');
 });
 
 test('signs and verifies expiring sessions and verifies administrator passwords', async () => {

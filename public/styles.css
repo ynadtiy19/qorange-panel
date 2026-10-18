@@ -50,6 +50,9 @@ h2 { font-size: 1.05rem; }
 .status.running { color: #3fb950; border-color: #238636; }
 .status.stopped { color: #d29922; border-color: #9e6a03; }
 .status.uninstalled { color: #8b949e; }
+.status.deploying { color: #58a6ff; border-color: #1f6feb; }
+.status.failed, .status.missing { color: #ff7b72; border-color: #8e3338; }
+.button:disabled { cursor: wait; opacity: .65; }
 .empty-state { color: #8b949e; padding: 24px 0 8px; text-align: center; }
 .notice { margin: 18px 0; padding: 12px 14px; border: 1px solid #9e6a03; border-radius: 8px; color: #e3b341; background: #2d2208; font-size: .88rem; }
 .notice.error-notice { color: #ff7b72; border-color: #8e3338; background: #2b1215; }
@@ -71,6 +74,15 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
 .env-row { display: grid; grid-template-columns: minmax(110px, .7fr) 1.3fr auto; gap: 8px; align-items: center; }
 .env-row input { min-width: 0; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; }
 .env-row button { border: 0; background: transparent; color: #ff7b72; font-size: 1.2rem; }
+.environment-table { border: 1px solid #30363d; border-radius: 8px; overflow-x: auto; }
+.environment-table-heading, .environment-row { min-width: 550px; display: grid; grid-template-columns: 1.1fr 1fr .65fr auto; gap: 12px; align-items: center; padding: 10px 12px; }
+.environment-table-heading { color: #8b949e; background: #0d1117; font-size: .75rem; }
+.environment-row + .environment-row { border-top: 1px solid #30363d; }
+.environment-row code, .environment-row > span { overflow-wrap: anywhere; font-size: .82rem; }
+.environment-row > span:nth-child(2) { color: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+.privacy-label { color: #3fb950; }
+.environment-actions { display: flex; gap: 6px; }
+.environment-actions .button { padding: 6px 8px; font-size: .76rem; }
 .error { min-height: 1.2em; color: #ff7b72; font-size: .8rem; }
 .modal-actions { justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .log-modal { width: min(900px, calc(100% - 28px)); }
