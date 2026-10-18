@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Readable } = require('node:stream');
 const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
@@ -24,6 +25,7 @@ process.env.ENV_DIR = envDir;
 process.env.WORKSPACE_DIR = path.join(root, 'builds');
 process.env.AUTH_FILE = authFile;
 process.env.SESSION_KEY_FILE = keyFile;
+process.env.GITHUB_CLIENT_ID = 'QOrangeTestClientID1';
 process.env.BIND_ADDRESS = '127.0.0.1';
 process.env.COOKIE_SECURE = '0';
 fs.mkdirSync(process.env.WORKSPACE_DIR, { recursive: true });
@@ -73,23 +75,64 @@ const archiveFile = path.join(root, 'repository.tar.gz');
 fs.mkdirSync(archiveSource);
 fs.writeFileSync(path.join(archiveSource, 'app.txt'), 'safe fixture source');
 execFileSync('tar', ['-czf', archiveFile, '-C', archiveSource, '.']);
-const ghStub = path.join(root, 'gh-stub.js');
-fs.writeFileSync(ghStub, `#!/usr/bin/env node
-if (process.argv[2] === 'auth') process.exit(0);
-if (process.argv[2] === 'api') {
-    const fail = () => process.stderr.write(process.env.FAKE_GH_STDERR || 'archive download failed', () => process.exit(7));
-    const sendArchive = () => require('node:fs').createReadStream(process.env.FAKE_GH_ARCHIVE).pipe(process.stdout);
-    if (process.env.FAKE_GH_MODE === 'success') sendArchive();
-    else if (process.env.FAKE_GH_MODE === 'slow-success') setTimeout(sendArchive, 300);
-    else if (process.env.FAKE_GH_MODE === 'slow') setTimeout(fail, 300);
-    else fail();
-}
-`);
-fs.chmodSync(ghStub, 0o700);
-process.env.GH_CLI_PATH = ghStub;
-process.env.FAKE_GH_ARCHIVE = archiveFile;
+const githubApiCalls = [];
+let deviceFlowNumber = 0;
+const fakeGithubFetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    const authorization = options.headers && options.headers.Authorization;
+    githubApiCalls.push({ url: parsed.href, authorization, method: options.method || 'GET' });
+    if (parsed.pathname.endsWith('/login/oauth/device/code')) {
+        deviceFlowNumber += 1;
+        return new Response(JSON.stringify({
+            device_code: `private-device-code-${deviceFlowNumber}`,
+            user_code: `DEVICE-${deviceFlowNumber}`,
+            verification_uri: 'https://github.com/login/device',
+            expires_in: 600,
+            interval: 1
+        }));
+    }
+    if (parsed.pathname.endsWith('/login/oauth/access_token')) {
+        if (process.env.FAKE_OAUTH_ERROR) {
+            return new Response(JSON.stringify({ error: process.env.FAKE_OAUTH_ERROR }));
+        }
+        return new Response(JSON.stringify({ access_token: process.env.FAKE_OAUTH_TOKEN || '' }));
+    }
+    if (parsed.pathname === '/user') {
+        const login = authorization && authorization.startsWith('Bearer alice-') ? 'alice'
+            : authorization === 'Bearer bob-oauth-token-for-tests' ? 'bob' : 'public-user';
+        return new Response(JSON.stringify({ login, name: login.toUpperCase() }));
+    }
+    if (parsed.pathname === '/user/repos') {
+        const owner = authorization === 'Bearer bob-oauth-token-for-tests' ? 'bob' : 'alice';
+        return new Response(JSON.stringify([{
+            full_name: `${owner}/private-app`,
+            name: 'private-app',
+            html_url: `https://github.com/${owner}/private-app`,
+            private: true,
+            default_branch: 'main'
+        }]));
+    }
+    if (/^\/repos\/[^/]+\/[^/]+\/branches$/.test(parsed.pathname)) {
+        if (process.env.FAKE_BRANCH_FAIL === '1') return new Response('unavailable', { status: 503 });
+        return new Response(JSON.stringify([{ name: 'main' }, { name: 'feature/pi' }]));
+    }
+    if (/^\/repos\/[^/]+\/[^/]+\/tarball\//.test(parsed.pathname)) {
+        if (process.env.FAKE_GH_MODE === 'slow-success') await new Promise(resolve => setTimeout(resolve, 300));
+        if (process.env.FAKE_GH_MODE === 'slow') {
+            await new Promise(resolve => setTimeout(resolve, 300));
+            return new Response(process.env.FAKE_GH_STDERR || 'archive download failed', { status: 503 });
+        }
+        if (process.env.FAKE_GH_MODE === 'success' || process.env.FAKE_GH_MODE === 'slow-success') {
+            const stream = Readable.toWeb(fs.createReadStream(archiveFile));
+            return new Response(stream, { headers: { 'Content-Length': String(fs.statSync(archiveFile).size) } });
+        }
+        return new Response('archive download failed', { status: 503 });
+    }
+    return new Response('not found', { status: 404 });
+};
 
-const { app } = require('../app');
+const { app, setGithubFetchForTests } = require('../app');
+setGithubFetchForTests(fakeGithubFetch);
 let server;
 let baseUrl;
 
@@ -104,7 +147,7 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
     const origin = baseUrl;
 
-    const unauthorized = await fetch(`${baseUrl}/api/github/info`);
+    const unauthorized = await fetch(`${baseUrl}/api/github/accounts`);
     assert.equal(unauthorized.status, 401);
 
     const originRejected = await fetch(`${baseUrl}/api/login`, {
@@ -132,6 +175,87 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.match(login.headers.get('set-cookie'), /HttpOnly/);
     assert.match(login.headers.get('set-cookie'), /SameSite=Strict/);
     assert.equal(JSON.stringify(loginBody).includes('test-admin-password-long-enough'), false);
+    const protectedAccounts = await fetch(`${baseUrl}/api/github/accounts`);
+    assert.equal(protectedAccounts.status, 401);
+    assert.equal(protectedAccounts.headers.get('cache-control'), 'no-store');
+
+    const csrfHeaders = {
+        Cookie: cookie,
+        Origin: origin,
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': loginBody.csrfToken
+    };
+    const accountList = await fetch(`${baseUrl}/api/github/accounts`, { headers: { Cookie: cookie } });
+    assert.equal(accountList.status, 200);
+    assert.equal(accountList.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await accountList.json(), { clientConfigured: true, accounts: [] });
+    const missingCsrfDevice = await fetch(`${baseUrl}/api/github/device`, {
+        method: 'POST',
+        headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' },
+        body: '{}'
+    });
+    assert.equal(missingCsrfDevice.status, 403);
+
+    process.env.FAKE_OAUTH_TOKEN = 'alice-oauth-token-for-tests';
+    const deviceResponse = await fetch(`${baseUrl}/api/github/device`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const deviceResponseText = await deviceResponse.text();
+    assert.equal(deviceResponse.status, 200, deviceResponseText);
+    assert.equal(deviceResponse.headers.get('cache-control'), 'no-store');
+    const device = JSON.parse(deviceResponseText);
+    assert.equal(device.userCode, 'DEVICE-1');
+    assert.equal(device.verificationUri, 'https://github.com/login/device');
+    assert.equal(deviceResponseText.includes('private-device-code'), false);
+    assert.equal(deviceResponseText.includes('alice-oauth-token-for-tests'), false);
+    const oauthCallsBeforePoll = githubApiCalls.filter(call => call.url.endsWith('/login/oauth/access_token')).length;
+    const tooSoon = await fetch(`${baseUrl}/api/github/device/${device.deviceId}/poll`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    assert.equal((await tooSoon.json()).status, 'pending');
+    assert.equal(githubApiCalls.filter(call => call.url.endsWith('/login/oauth/access_token')).length, oauthCallsBeforePoll);
+    await new Promise(resolve => setTimeout(resolve, 1050));
+    const completedDevice = await fetch(`${baseUrl}/api/github/device/${device.deviceId}/poll`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const completedDeviceText = await completedDevice.text();
+    assert.equal(completedDevice.status, 200, completedDeviceText);
+    assert.match(completedDeviceText, /"login":"alice"/);
+    assert.equal(completedDeviceText.includes('alice-oauth-token-for-tests'), false);
+    const accountsFile = path.join(dataDir, 'github-accounts.json');
+    const linkedAccountFile = JSON.parse(fs.readFileSync(accountsFile, 'utf8'));
+    assert.equal(fs.statSync(accountsFile).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(dataDir).mode & 0o777, 0o700);
+    assert.equal(linkedAccountFile.accounts[0].token, 'alice-oauth-token-for-tests');
+    const aliceAccountId = linkedAccountFile.accounts[0].id;
+    const accountListing = await fetch(`${baseUrl}/api/github/accounts`, { headers: { Cookie: cookie } });
+    const accountListingText = await accountListing.text();
+    assert.equal(accountListingText.includes('alice-oauth-token-for-tests'), false);
+    assert.match(accountListingText, /"login":"alice"/);
+
+    const aliceRepositories = await fetch(`${baseUrl}/api/github/accounts/${aliceAccountId}/repositories`, {
+        headers: { Cookie: cookie }
+    });
+    assert.deepEqual((await aliceRepositories.json()).repos.map(repo => repo.nameWithOwner), ['alice/private-app']);
+    assert.equal(githubApiCalls.at(-1).authorization, 'Bearer alice-oauth-token-for-tests');
+    const aliceBranches = await fetch(`${baseUrl}/api/github/branches?repo=alice%2Fprivate-app&accountId=${aliceAccountId}`, {
+        headers: { Cookie: cookie }
+    });
+    assert.deepEqual((await aliceBranches.json()).branches, ['main', 'feature/pi']);
+    assert.equal(githubApiCalls.at(-1).authorization, 'Bearer alice-oauth-token-for-tests');
+    process.env.FAKE_BRANCH_FAIL = '1';
+    const branchFailure = await fetch(`${baseUrl}/api/github/branches?repo=alice%2Fprivate-app&accountId=${aliceAccountId}`, {
+        headers: { Cookie: cookie }
+    });
+    assert.equal(branchFailure.status, 502);
+    assert.match((await branchFailure.json()).error, /503/);
+    delete process.env.FAKE_BRANCH_FAIL;
 
     const noCsrf = await fetch(`${baseUrl}/api/services`, {
         method: 'POST',
@@ -173,6 +297,59 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(Object.hasOwn(stored.services[0], 'env'), false);
     assert.equal(fs.readFileSync(path.join(envDir, 'website.env'), 'utf8').includes(secret), true);
     assert.equal(fs.statSync(path.join(envDir, 'website.env')).mode & 0o777, 0o600);
+
+    const aliceServiceResponse = await fetch(`${baseUrl}/api/services`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: JSON.stringify({
+            id: 'private-alice',
+            name: 'Alice Private App',
+            repo: 'alice/private-app',
+            branch: 'feature/pi',
+            githubAccountId: aliceAccountId,
+            env: ''
+        })
+    });
+    assert.equal(aliceServiceResponse.status, 201, await aliceServiceResponse.text());
+    let savedServices = JSON.parse(fs.readFileSync(path.join(dataDir, 'services.json'), 'utf8')).services;
+    assert.equal(savedServices.find(service => service.id === 'private-alice').githubAccountId, aliceAccountId);
+    assert.equal(githubApiCalls.at(-1).authorization, 'Bearer alice-oauth-token-for-tests');
+
+    process.env.FAKE_OAUTH_TOKEN = 'bob-oauth-token-for-tests';
+    const bobDeviceResponse = await fetch(`${baseUrl}/api/github/device`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const bobDevice = await bobDeviceResponse.json();
+    await new Promise(resolve => setTimeout(resolve, 1050));
+    const bobAuthorization = await fetch(`${baseUrl}/api/github/device/${bobDevice.deviceId}/poll`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const bobAuthorizationBody = await bobAuthorization.json();
+    assert.equal(bobAuthorizationBody.account.login, 'bob');
+    assert.equal(JSON.stringify(bobAuthorizationBody).includes('bob-oauth-token-for-tests'), false);
+    const linkedAccounts = JSON.parse(fs.readFileSync(accountsFile, 'utf8')).accounts;
+    assert.equal(linkedAccounts.length, 2);
+    const bobAccountId = linkedAccounts.find(account => account.login === 'bob').id;
+    const bobServiceResponse = await fetch(`${baseUrl}/api/services`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: JSON.stringify({
+            id: 'private-bob',
+            name: 'Bob Private App',
+            repo: 'bob/private-app',
+            branch: 'main',
+            githubAccountId: bobAccountId,
+            env: ''
+        })
+    });
+    assert.equal(bobServiceResponse.status, 201, await bobServiceResponse.text());
+    savedServices = JSON.parse(fs.readFileSync(path.join(dataDir, 'services.json'), 'utf8')).services;
+    assert.equal(savedServices.find(service => service.id === 'private-bob').githubAccountId, bobAccountId);
+    assert.equal(githubApiCalls.at(-1).authorization, 'Bearer bob-oauth-token-for-tests');
 
     const duplicateService = await fetch(`${baseUrl}/api/services`, {
         method: 'POST',
@@ -428,6 +605,10 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const successfulBuildText = await successfulBuildResponse.text();
     assert.equal(successfulBuildResponse.status, 200, successfulBuildText);
     assert.equal(successfulBuildText.includes('updated-secret-never-returned'), false);
+    const publicArchiveRequest = githubApiCalls.findLast(call =>
+        call.url.includes('/repos/org/site/tarball/main'));
+    assert.ok(publicArchiveRequest);
+    assert.equal(publicArchiveRequest.authorization, undefined);
     const successfulDeployment = JSON.parse(fs.readFileSync(deploymentRegistry, 'utf8')).services[0].deployment;
     assert.equal(successfulDeployment.status, 'succeeded');
     assert.ok(Date.parse(successfulDeployment.lastSuccessAt));
@@ -499,6 +680,61 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     delete process.env.FAKE_DOCKER_UNOWNED_AFTER_RUN;
     fs.unlinkSync(unownedAfterRunPath);
 
+    process.env.FAKE_GH_MODE = 'success';
+    process.env.FAKE_DOCKER_OWNER = 'private-bob';
+    const privateBuild = await fetch(`${baseUrl}/api/services/private-bob/action`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: JSON.stringify({ action: 'build' })
+    });
+    const privateBuildText = await privateBuild.text();
+    assert.equal(privateBuild.status, 200, privateBuildText);
+    const bobArchiveRequest = githubApiCalls.findLast(call =>
+        call.url.includes('/repos/bob/private-app/tarball/main'));
+    assert.ok(bobArchiveRequest);
+    assert.equal(bobArchiveRequest.authorization, 'Bearer bob-oauth-token-for-tests');
+    const selectedAccountSystem = await systemRequest();
+    const selectedAccountServices = (await selectedAccountSystem.json()).services;
+    assert.equal(selectedAccountServices.find(service => service.id === 'private-bob').githubAccountLogin, 'bob');
+    assert.equal(selectedAccountServices.find(service => service.id === 'private-alice').githubAccountLogin, 'alice');
+
+    const unlinkAlice = await fetch(`${baseUrl}/api/github/accounts/${aliceAccountId}`, {
+        method: 'DELETE',
+        headers: csrfHeaders
+    });
+    assert.equal(unlinkAlice.status, 200);
+    const storedAccountsAfterUnlink = JSON.parse(fs.readFileSync(accountsFile, 'utf8')).accounts;
+    const aliceDisconnected = storedAccountsAfterUnlink.find(account => account.id === aliceAccountId);
+    assert.equal(Object.hasOwn(aliceDisconnected, 'token'), false);
+    const accountsAfterUnlinkResponse = await fetch(`${baseUrl}/api/github/accounts`, { headers: { Cookie: cookie } });
+    const accountsAfterUnlinkText = await accountsAfterUnlinkResponse.text();
+    assert.equal(accountsAfterUnlinkText.includes('alice'), false);
+    assert.equal(accountsAfterUnlinkText.includes('alice-oauth-token-for-tests'), false);
+    const servicesAfterUnlink = JSON.parse(fs.readFileSync(path.join(dataDir, 'services.json'), 'utf8')).services;
+    assert.equal(servicesAfterUnlink.find(service => service.id === 'private-alice').githubAccountId, aliceAccountId);
+    const unlinkedServiceStatus = await systemRequest();
+    const unlinkedService = (await unlinkedServiceStatus.json()).services.find(service => service.id === 'private-alice');
+    assert.equal(unlinkedService.githubAccountId, aliceAccountId);
+    assert.equal(unlinkedService.githubAccountLogin, null);
+    process.env.FAKE_OAUTH_TOKEN = 'alice-reconnected-oauth-token';
+    const reconnectDeviceResponse = await fetch(`${baseUrl}/api/github/device`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const reconnectDevice = await reconnectDeviceResponse.json();
+    await new Promise(resolve => setTimeout(resolve, 1050));
+    const reconnectResult = await fetch(`${baseUrl}/api/github/device/${reconnectDevice.deviceId}/poll`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const reconnectAccount = (await reconnectResult.json()).account;
+    assert.equal(reconnectAccount.id, aliceAccountId);
+    const reconnectedSystem = await systemRequest();
+    const reconnectedService = (await reconnectedSystem.json()).services.find(service => service.id === 'private-alice');
+    assert.equal(reconnectedService.githubAccountLogin, 'alice');
+
     process.env.FAKE_DOCKER_PS = '';
     process.env.FAKE_GH_MODE = 'slow';
     process.env.FAKE_GH_STDERR = `archive failed while using ${'updated-secret-never-returned'}`;
@@ -521,7 +757,7 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal((await failingInProgressSystem.json()).services[0].status, 'deploying');
     const buildResponse = await buildRequest;
     const buildResponseText = await buildResponse.text();
-    assert.equal(buildResponse.status, 500, buildResponseText);
+    assert.equal(buildResponse.status, 502, buildResponseText);
     assert.equal(buildResponseText.includes('updated-secret-never-returned'), false);
     const failedBuild = JSON.parse(fs.readFileSync(deploymentRegistry, 'utf8')).services[0].deployment;
     assert.equal(failedBuild.status, 'failed');

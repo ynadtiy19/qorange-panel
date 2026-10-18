@@ -53,11 +53,27 @@ test('validates repository services, ports, branches, and container identifiers'
         port: '8080:3000'
     });
     assert.equal(containerName('website_1'), 'qorange-website_1');
+    assert.equal(validateBranch('feature/日本語-release'), 'feature/日本語-release');
     assert.throws(() => validateServiceId('$(touch-pwned)'), /服务 ID/);
-    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'https://github.com/org/repo', branch: 'main' }), /请从已登录的 GitHub 账户/);
+    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'https://github.com/org/repo', branch: 'main' }), /owner\/repository/);
     assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: '../main' }), /分支名称/);
     assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: 'main', port: '8080;id' }), /端口必须/);
+    assert.equal(validateService({
+        id: 'private-app',
+        name: 'Private',
+        repo: 'org/repo',
+        branch: 'main',
+        githubAccountId: '5b07a718-5ba2-4223-9337-50ddc9468112'
+    }).githubAccountId, '5b07a718-5ba2-4223-9337-50ddc9468112');
+    assert.throws(() => validateService({
+        id: 'private-app',
+        name: 'Private',
+        repo: 'org/repo',
+        branch: 'main',
+        githubAccountId: 'not-an-account'
+    }), /GitHub account selection/);
     assert.throws(() => validateBranch('-option'), /分支名称/);
+    assert.throws(() => validateBranch('feature/name?query'), /分支名称/);
 });
 
 test('redacts environment values from output', () => {
@@ -126,7 +142,7 @@ test('installer syntax and safety guards preserve MongoDB and user app data', ()
     assert.equal(syntax.status, 0, syntax.stderr);
     const source = fs.readFileSync(installer, 'utf8');
     assert.match(source, /docker info/);
-    assert.match(source, /gh auth status/);
+    assert.doesNotMatch(source, /gh auth status/);
     assert.match(source, /\/data\/mongo_data/);
     assert.match(source, /\.qorange-panel-owned/);
     assert.match(source, /# QOrange Panel managed/);
@@ -134,7 +150,7 @@ test('installer syntax and safety guards preserve MongoDB and user app data', ()
     assert.doesNotMatch(source, /rm\s+-rf\s+\/data\/apps/);
     assert.match(source, /if \[\[ ! -e "\$PANEL_ENV" \]\]/);
     assert.match(source, /for state_file in "\$ETC_DIR\/session\.key" "\$ETC_DIR\/auth\.json"/);
-    assert.match(source, /GH_CLI_PATH=%s/);
+    assert.match(source, /GITHUB_CLIENT_ID/);
 });
 
 test('updater validates the existing installation and retains rollback and user state', () => {
@@ -149,7 +165,7 @@ test('updater validates the existing installation and retains rollback and user 
     assert.match(source, /"\$ETC_DIR\/panel\.env"/);
     assert.doesNotMatch(source, /create-auth\.js/);
     assert.doesNotMatch(source, /rm\s+-rf\s+\/data\/apps/);
-    assert.match(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), /process\.env\.GH_CLI_PATH/);
+    assert.match(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), /process\.env\.GITHUB_CLIENT_ID/);
 });
 
 test('detects a deterministic Dockerfile or Compose recipe without executing guessed commands', () => {

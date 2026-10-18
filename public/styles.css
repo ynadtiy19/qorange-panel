@@ -85,6 +85,10 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
 .privacy-label { color: #3fb950; }
 .environment-actions { display: flex; gap: 6px; }
 .environment-actions .button { padding: 6px 8px; font-size: .76rem; }
+.device-panel { margin: 12px 0; padding: 14px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; }
+.device-panel p + p { margin-top: 8px; }
+.device-panel a { color: #79c0ff; }
+.device-code { display: block; margin-top: 8px; color: #f2a76d; font: 1.5rem ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
 .error { min-height: 1.2em; color: #ff7b72; font-size: .8rem; }
 .modal-actions { justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .log-modal { width: min(900px, calc(100% - 28px)); }
