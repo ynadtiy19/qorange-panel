@@ -19,6 +19,11 @@ const {
 } = require('./lib/github');
 const { collectSystemMetrics, sampleCpuUsage } = require('./lib/system');
 const {
+    collectDockerResources,
+    actOnContainer,
+    actOnImage
+} = require('./lib/docker-resources');
+const {
     parseEnv,
     validateService,
     validateServiceId,
@@ -54,6 +59,7 @@ const GITHUB_ACCOUNT_FILE = path.join(DATA_DIR, 'github-accounts.json');
 const DOCKER_CLI_PATH = process.env.DOCKER_CLI_PATH || 'docker';
 const loginAttempts = new Map();
 const serviceOperations = new Map();
+const dockerResourceOperations = new Map();
 let previousCpuSnapshot = null;
 const githubDeviceFlows = new Map();
 let githubHttpFetch = (...args) => globalThis.fetch(...args);
@@ -64,9 +70,22 @@ function runFile(file, args, options = {}) {
         cwd: options.cwd,
         env: process.env,
         encoding: 'utf8',
-        maxBuffer: 20 * 1024 * 1024,
+        maxBuffer: options.maxBuffer || 20 * 1024 * 1024,
         timeout: options.timeout || 10 * 60 * 1000,
         windowsHide: true
+    });
+}
+
+function runDocker(args, options = {}) {
+    return runFile(DOCKER_CLI_PATH, args, {
+        timeout: options.timeout || 15000,
+        maxBuffer: 2 * 1024 * 1024
+    }).catch(error => {
+        if (!error.publicCode) {
+            error.publicCode = error.code === 'ETIMEDOUT' ? 'DOCKER_TIMEOUT' : 'DOCKER_COMMAND_FAILED';
+            error.statusCode = 503;
+        }
+        throw error;
     });
 }
 
@@ -715,6 +734,53 @@ app.get('/api/system', async (_req, res) => {
     }
 });
 
+app.get('/api/docker-resources', async (_req, res) => {
+    try {
+        const resources = await collectDockerResources(runDocker);
+        res.json(resources);
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+async function withDockerResourceLock(key, operation) {
+    if (dockerResourceOperations.has(key)) {
+        const error = new Error('Another Docker resource operation is already in progress.');
+        error.statusCode = 409;
+        error.publicCode = 'OPERATION_IN_PROGRESS';
+        throw error;
+    }
+    const pending = Promise.resolve().then(operation);
+    dockerResourceOperations.set(key, pending);
+    try {
+        return await pending;
+    } finally {
+        if (dockerResourceOperations.get(key) === pending) dockerResourceOperations.delete(key);
+    }
+}
+
+app.post('/api/docker-resources/containers/:id/action', async (req, res) => {
+    const id = req.params.id;
+    try {
+        const result = await withDockerResourceLock(`container:${id}`, () =>
+            actOnContainer(runDocker, id, req.body && req.body.action, req.body && req.body.confirmation));
+        res.json({ success: true, ...result });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.post('/api/docker-resources/images/:id/action', async (req, res) => {
+    const id = req.params.id;
+    try {
+        const result = await withDockerResourceLock(`image:${id}`, () =>
+            actOnImage(runDocker, id, req.body && req.body.action, req.body && req.body.confirmation));
+        res.json({ success: true, ...result });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
 app.post('/api/services', async (req, res) => {
     try {
         const input = req.body || {};
@@ -911,25 +977,12 @@ app.post('/api/services/:id/action', async (req, res) => {
                 return;
             }
             if (action === 'delete') {
-                const preserveUnownedContainer = req.body && req.body.preserveUnownedContainer === true;
-                let containerId;
-                let preservedUnownedContainer = false;
-                try {
-                    containerId = await ownedContainerId(name, id);
-                } catch (error) {
-                    if (error.publicCode !== 'UNOWNED_CONTAINER' || !preserveUnownedContainer) throw error;
-                    preservedUnownedContainer = true;
-                }
-                if (preserveUnownedContainer && containerId) {
-                    const error = new Error('同名容器现已由 QOrange 管理；未移除服务记录或环境变量。请重新选择普通删除以移除托管容器');
-                    error.statusCode = 409;
-                    throw error;
-                }
+                const containerId = await ownedContainerId(name, id);
                 if (containerId) await removeOwnedContainer(containerId);
                 try { fs.unlinkSync(envFilePath(id)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
                 const services = readServices().filter(item => item.id !== id);
                 writeServices(services);
-                res.json({ success: true, containerPreserved: preservedUnownedContainer });
+                res.json({ success: true });
                 return;
             }
             const containerId = await ownedContainerId(name, id);

@@ -34,6 +34,64 @@ fs.writeFileSync(dockerStub, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (process.env.FAKE_DOCKER_LOG) fs.appendFileSync(process.env.FAKE_DOCKER_LOG, JSON.stringify(args) + '\\n');
+if (process.env.FAKE_DOCKER_RESOURCES === 'fixture') {
+    const containerId = 'a'.repeat(64);
+    const imageId = 'b'.repeat(64);
+    const containerArgs = [
+        containerId, '/fixture-app', 'running', 'fixture-app:latest', imageId, 'true', '8', '512',
+        JSON.stringify({ '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: '8080' }] }),
+        JSON.stringify([{ Type: 'volume', Name: 'mongo_data', Source: '/var/lib/docker/volumes/mongo_data/_data', Destination: '/data/mongo_data', RW: true }]),
+        ...[
+            process.env.FAKE_DOCKER_RESOURCE_UNOWNED === '1' ? 'external' : 'true',
+            'fixture-app', '', '', '', ''
+        ].map(value => JSON.stringify(value))
+    ];
+    const imageArgs = [
+        imageId, JSON.stringify(['fixture-app:latest', 'fixture-app:stable']),
+        JSON.stringify(['example/fixture@sha256:' + 'c'.repeat(64)]), '2048',
+        ...['true', 'fixture-app', '', '', '', ''].map(value => JSON.stringify(value))
+    ];
+    if (args[0] === 'container' && args[1] === 'ls') {
+        if (process.env.FAKE_DOCKER_RESOURCE_FAIL === '1') {
+            process.stderr.write('fixture daemon unavailable');
+            process.exit(1);
+        }
+        process.stdout.write(process.env.FAKE_DOCKER_RESOURCE_NO_CONTAINERS === '1' ? '' : containerId + '\\n');
+        process.exit(0);
+    }
+    if (args[0] === 'image' && args[1] === 'ls') {
+        process.stdout.write(imageId + '\\n');
+        process.exit(0);
+    }
+    if (args[0] === 'volume' && args[1] === 'ls') {
+        process.stdout.write('mongo_data\\n');
+        process.exit(0);
+    }
+    if (args[0] === 'container' && args[1] === 'inspect') {
+        let owner = process.env.FAKE_DOCKER_RESOURCE_UNOWNED === '1' ? 'external' : 'true';
+        if (process.env.FAKE_DOCKER_RESOURCE_RACE === '1') {
+            const counterFile = process.env.FAKE_DOCKER_RESOURCE_INSPECT_COUNT;
+            const count = Number(fs.existsSync(counterFile) ? fs.readFileSync(counterFile, 'utf8') : '0') + 1;
+            fs.writeFileSync(counterFile, String(count));
+            if (count === 3) owner = 'changed-owner';
+        }
+        containerArgs[10] = JSON.stringify(owner);
+        process.stdout.write(containerArgs.join('\\t') + '\\n');
+        process.exit(0);
+    }
+    if (args[0] === 'image' && args[1] === 'inspect') {
+        process.stdout.write(imageArgs.join('\\t') + '\\n');
+        process.exit(0);
+    }
+    if (args[0] === 'volume' && args[1] === 'inspect') {
+        process.stdout.write([
+            'mongo_data', 'local', 'local', '/var/lib/docker/volumes/mongo_data/_data',
+            ...['true', 'mongo', '', '', '', ''].map(value => JSON.stringify(value)), '4096', '1'
+        ].join('\\t') + '\\n');
+        process.exit(0);
+    }
+    process.exit(0);
+}
 if (process.argv[2] === 'ps') {
     if (process.env.FAKE_DOCKER_FAIL === '1') {
         process.stderr.write('daemon unavailable');
@@ -195,6 +253,108 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(accountList.status, 200);
     assert.equal(accountList.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await accountList.json(), { clientConfigured: true, accounts: [] });
+    const protectedResources = await fetch(`${baseUrl}/api/docker-resources`);
+    assert.equal(protectedResources.status, 401);
+    const resourceResponse = await fetch(`${baseUrl}/api/docker-resources`, { headers: { Cookie: cookie } });
+    const resourceText = await resourceResponse.text();
+    assert.equal(resourceResponse.status, 200, resourceText);
+    assert.equal(resourceResponse.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(JSON.parse(resourceText), {
+        status: 'available',
+        error: null,
+        containers: { available: true, truncated: false, totalCount: 0, items: [] },
+        images: { available: true, truncated: false, totalCount: 0, items: [] },
+        volumes: { available: true, truncated: false, totalCount: 0, items: [] }
+    });
+    const resourceContainerId = 'a'.repeat(64);
+    const resourceImageId = 'b'.repeat(64);
+    const dockerResourceLog = path.join(root, 'docker-resource-operations.jsonl');
+    const inspectCountFile = path.join(root, 'docker-resource-inspect-count');
+    process.env.FAKE_DOCKER_RESOURCES = 'fixture';
+    process.env.FAKE_DOCKER_LOG = dockerResourceLog;
+    process.env.FAKE_DOCKER_RESOURCE_INSPECT_COUNT = inspectCountFile;
+    const fixtureInventoryResponse = await fetch(`${baseUrl}/api/docker-resources`, { headers: { Cookie: cookie } });
+    const fixtureInventory = await fixtureInventoryResponse.json();
+    assert.equal(fixtureInventoryResponse.status, 200);
+    assert.equal(fixtureInventory.containers.items[0].id, resourceContainerId);
+    assert.equal(fixtureInventory.containers.items[0].ownership, 'qorange');
+    assert.equal(fixtureInventory.images.items[0].referencedBy[0].id, resourceContainerId);
+    assert.equal(fixtureInventory.volumes.items[0].usedBy[0].destination, '/data/mongo_data');
+    assert.equal(JSON.stringify(fixtureInventory).includes('Config.Env'), false);
+    assert.equal(JSON.stringify(fixtureInventory).includes('SECRET_VALUE'), false);
+    process.env.FAKE_DOCKER_RESOURCE_FAIL = '1';
+    const unavailableInventoryResponse = await fetch(`${baseUrl}/api/docker-resources`, { headers: { Cookie: cookie } });
+    const unavailableInventory = await unavailableInventoryResponse.json();
+    assert.equal(unavailableInventoryResponse.status, 200);
+    assert.equal(unavailableInventory.containers.available, false);
+    assert.match(unavailableInventory.containers.error, /fixture daemon unavailable/);
+    assert.equal(unavailableInventory.status, 'unavailable');
+    delete process.env.FAKE_DOCKER_RESOURCE_FAIL;
+    const resourceAction = (kind, id, action, confirmation) => fetch(
+        `${baseUrl}/api/docker-resources/${kind}/${encodeURIComponent(id)}/action`,
+        {
+            method: 'POST',
+            headers: csrfHeaders,
+            body: JSON.stringify({ action, confirmation })
+        });
+    fs.writeFileSync(dockerResourceLog, '');
+    const stoppedResource = await resourceAction('containers', resourceContainerId, 'stop', resourceContainerId);
+    assert.equal(stoppedResource.status, 200, await stoppedResource.clone().text());
+    assert.equal((await stoppedResource.json()).stopped, true);
+    let resourceDockerCalls = fs.readFileSync(dockerResourceLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(resourceDockerCalls.some(args => args[0] === 'container' && args[1] === 'stop' && args[2] === resourceContainerId));
+
+    fs.writeFileSync(dockerResourceLog, '');
+    fs.writeFileSync(inspectCountFile, '0');
+    process.env.FAKE_DOCKER_RESOURCE_RACE = '1';
+    const racedRemoval = await resourceAction('containers', resourceContainerId, 'remove', resourceContainerId);
+    assert.equal(racedRemoval.status, 409);
+    assert.equal((await racedRemoval.json()).code, 'RESOURCE_CHANGED');
+    resourceDockerCalls = fs.readFileSync(dockerResourceLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(resourceDockerCalls.some(args => args[0] === 'container' && args[1] === 'stop'));
+    assert.equal(resourceDockerCalls.some(args => args[0] === 'container' && args[1] === 'rm'), false);
+    delete process.env.FAKE_DOCKER_RESOURCE_RACE;
+
+    fs.writeFileSync(dockerResourceLog, '');
+    fs.writeFileSync(inspectCountFile, '0');
+    const removedResource = await resourceAction('containers', resourceContainerId, 'remove', resourceContainerId);
+    assert.equal(removedResource.status, 200, await removedResource.clone().text());
+    assert.equal((await removedResource.json()).volumesPreserved, true);
+    resourceDockerCalls = fs.readFileSync(dockerResourceLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(resourceDockerCalls.some(args => args[0] === 'container' && args[1] === 'rm' && args[2] === resourceContainerId));
+    assert.equal(resourceDockerCalls.some(args => args[0] === 'volume' && args[1] === 'rm'), false);
+    assert.equal(resourceDockerCalls.some(args => args[0] === 'container' && args[1] === 'rm' && args.includes('-v')), false);
+
+    fs.writeFileSync(dockerResourceLog, '');
+    const inUseImage = await resourceAction('images', resourceImageId, 'remove', resourceImageId);
+    assert.equal(inUseImage.status, 409);
+    assert.equal((await inUseImage.json()).code, 'IMAGE_IN_USE');
+    assert.equal(fs.readFileSync(dockerResourceLog, 'utf8').includes('"rm"'), false);
+    process.env.FAKE_DOCKER_RESOURCE_NO_CONTAINERS = '1';
+    fs.writeFileSync(dockerResourceLog, '');
+    const removedImage = await resourceAction('images', resourceImageId, 'remove', resourceImageId);
+    const removedImageBody = await removedImage.json();
+    assert.equal(removedImage.status, 200, JSON.stringify(removedImageBody));
+    assert.deepEqual(removedImageBody.removedTags, ['fixture-app:latest', 'fixture-app:stable']);
+    resourceDockerCalls = fs.readFileSync(dockerResourceLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(resourceDockerCalls.some(args => args[0] === 'image' && args[1] === 'rm' && args[2] === resourceImageId));
+    delete process.env.FAKE_DOCKER_RESOURCES;
+    delete process.env.FAKE_DOCKER_LOG;
+    delete process.env.FAKE_DOCKER_RESOURCE_NO_CONTAINERS;
+    delete process.env.FAKE_DOCKER_RESOURCE_INSPECT_COUNT;
+    const resourceClientScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+    const resourceActionWithoutCsrf = await fetch(`${baseUrl}/api/docker-resources/containers/${'a'.repeat(64)}/action`, {
+        method: 'POST',
+        headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop', confirmation: 'a'.repeat(64) })
+    });
+    assert.equal(resourceActionWithoutCsrf.status, 403);
+    const volumeDeleteRoute = await fetch(`${baseUrl}/api/docker-resources/volumes/mongo_data`, {
+        method: 'DELETE',
+        headers: { ...csrfHeaders }
+    });
+    assert.equal(volumeDeleteRoute.status, 404);
+    assert.match(resourceClientScript, /卷及其数据不会随容器删除/);
     const missingCsrfDevice = await fetch(`${baseUrl}/api/github/device`, {
         method: 'POST',
         headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' },
@@ -840,7 +1000,6 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const imageOnlyDelete = await deleteService('image-only');
     const imageOnlyDeleteText = await imageOnlyDelete.text();
     assert.equal(imageOnlyDelete.status, 200, imageOnlyDeleteText);
-    assert.equal(JSON.parse(imageOnlyDeleteText).containerPreserved, false);
     deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
     assert.equal(deleteRecords.some(service => service.id === 'image-only'), false);
     assert.equal(fs.existsSync(path.join(envDir, 'image-only.env')), false);
@@ -913,11 +1072,11 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
         body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
     });
     const confirmedUnownedContainerDeleteText = await confirmedUnownedContainerDelete.text();
-    assert.equal(confirmedUnownedContainerDelete.status, 200, confirmedUnownedContainerDeleteText);
-    assert.equal(JSON.parse(confirmedUnownedContainerDeleteText).containerPreserved, true);
+    assert.equal(confirmedUnownedContainerDelete.status, 409, confirmedUnownedContainerDeleteText);
+    assert.equal(JSON.parse(confirmedUnownedContainerDeleteText).code, 'UNOWNED_CONTAINER');
     deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
-    assert.equal(deleteRecords.some(service => service.id === 'protected'), false);
-    assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), false);
+    assert.equal(deleteRecords.some(service => service.id === 'protected'), true);
+    assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), true);
     assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
@@ -935,16 +1094,15 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
             'Content-Type': 'application/json',
             'X-CSRF-Token': loginBody.csrfToken
         },
-        body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
+        body: JSON.stringify({ action: 'delete' })
     });
     const ownershipChangedDeleteText = await ownershipChangedDelete.text();
-    assert.equal(ownershipChangedDelete.status, 409, ownershipChangedDeleteText);
-    assert.match(ownershipChangedDeleteText, /现已由 QOrange 管理/);
+    assert.equal(ownershipChangedDelete.status, 200, ownershipChangedDeleteText);
     deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
-    assert.equal(deleteRecords.some(service => service.id === 'racing-owned'), true);
-    assert.equal(fs.existsSync(path.join(envDir, 'racing-owned.env')), true);
+    assert.equal(deleteRecords.some(service => service.id === 'racing-owned'), false);
+    assert.equal(fs.existsSync(path.join(envDir, 'racing-owned.env')), false);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container', 'stop', 'rm']);
     assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
 
     const staticPage = await fetch(`${baseUrl}/`);
@@ -953,14 +1111,14 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.match(staticPage.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     const staticContent = await staticPage.text();
     assert.equal(staticContent.includes(secret), false);
-    assert.deepEqual([...staticContent.matchAll(/data-view="([^"]+)"/g)].map(match => match[1]), ['server', 'projects']);
+    assert.deepEqual([...staticContent.matchAll(/data-view="([^"]+)"/g)].map(match => match[1]), ['server', 'projects', 'docker-resources']);
     assert.match(staticContent, /id="server-view"/);
     assert.match(staticContent, /id="projects-view"/);
+    assert.match(staticContent, /id="docker-resources-view"/);
     assert.doesNotMatch(staticContent, /placeholder-view|data-view="(?:ssh|monitoring|status|upgrade|firewall|collaborators|settings)"/);
     const clientScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-    assert.match(clientScript, /const selectedView = view === 'projects' \? 'projects' : 'server'/);
-    assert.match(clientScript, /preserveUnownedContainer: true/);
-    assert.match(clientScript, /不会停止或删除该容器/);
+    assert.match(clientScript, /const selectedView = \['projects', 'docker-resources'\]\.includes\(view\) \? view : 'server'/);
+    assert.doesNotMatch(clientScript, /preserveUnownedContainer/);
 
     const servedClient = await fetch(`${baseUrl}/app.js`);
     assert.equal(servedClient.status, 200);
