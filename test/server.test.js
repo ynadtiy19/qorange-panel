@@ -29,7 +29,14 @@ process.env.COOKIE_SECURE = '0';
 fs.mkdirSync(process.env.WORKSPACE_DIR, { recursive: true });
 const dockerStub = path.join(root, 'docker-stub.js');
 fs.writeFileSync(dockerStub, `#!/usr/bin/env node
-if (process.argv[2] === 'ps') process.stdout.write(process.env.FAKE_DOCKER_PS || '');
+if (process.argv[2] === 'ps') {
+    if (process.env.FAKE_DOCKER_FAIL === '1') {
+        process.stderr.write('daemon unavailable');
+        process.exit(1);
+    }
+    process.stdout.write(process.env.FAKE_DOCKER_PS || '');
+}
+if (process.argv[2] === 'version') process.stdout.write('27.0.3\\n');
 if (process.argv[2] === 'inspect') process.stdout.write('true|website\\n');
 if (process.argv[2] === 'run') process.stdout.write('fake-container-id\\n');
 `);
@@ -243,12 +250,30 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const initialSystem = await systemRequest();
     const initialSystemText = await initialSystem.text();
     assert.equal(initialSystem.status, 200, initialSystemText);
-    const initialService = JSON.parse(initialSystemText).services[0];
+    const initialSystemBody = JSON.parse(initialSystemText);
+    assert.equal(typeof initialSystemBody.system.hostname, 'string');
+    assert.equal(typeof initialSystemBody.system.cpu.cores, 'number');
+    assert.equal(typeof initialSystemBody.system.memory.percent, 'number');
+    assert.equal(typeof initialSystemBody.system.disk.available, 'boolean');
+    assert.equal(initialSystemBody.panel.status, 'running');
+    assert.equal(initialSystemBody.docker.status, 'running');
+    assert.equal(initialSystemBody.docker.version, '27.0.3');
+    assert.equal(Array.isArray(initialSystemBody.managedContainers), true);
+    assert.equal(initialSystemText.includes('process.env'), false);
+    const initialService = initialSystemBody.services[0];
     assert.equal(initialService.status, 'uninstalled');
     assert.equal(initialService.environmentConfigured, true);
     assert.equal(initialService.environmentVariableCount, 1);
     assert.equal(initialSystemText.includes('updated-secret-never-returned'), false);
     assert.equal(initialSystemText.includes('replacement-secret-never-returned'), false);
+
+    process.env.FAKE_DOCKER_FAIL = '1';
+    const unavailableDocker = await systemRequest();
+    const unavailableDockerBody = await unavailableDocker.json();
+    assert.equal(unavailableDockerBody.docker.status, 'unavailable');
+    assert.equal(unavailableDockerBody.services[0].status, 'unknown');
+    assert.deepEqual(unavailableDockerBody.managedContainers, []);
+    process.env.FAKE_DOCKER_FAIL = '0';
 
     const deploymentRegistry = path.join(dataDir, 'services.json');
     const registry = JSON.parse(fs.readFileSync(deploymentRegistry, 'utf8'));
@@ -283,9 +308,17 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(missingService.status, 'missing');
     assert.equal(missingService.lastSuccessfulDeploymentAt, '2026-10-18T10:01:00.000Z');
 
-    process.env.FAKE_DOCKER_PS = 'qorange-website\tUp 2 minutes\n';
+    process.env.FAKE_DOCKER_PS = 'qorange-website\tUp 2 minutes\t0.0.0.0:8080->3000/tcp\n';
     const runningSystem = await systemRequest();
-    assert.equal((await runningSystem.json()).services[0].status, 'running');
+    const runningSystemBody = await runningSystem.json();
+    assert.equal(runningSystemBody.services[0].status, 'running');
+    assert.equal(runningSystemBody.services[0].containerPorts, '0.0.0.0:8080->3000/tcp');
+    assert.deepEqual(runningSystemBody.managedContainers, [{
+        name: 'qorange-website',
+        status: 'Up 2 minutes',
+        running: true,
+        ports: '0.0.0.0:8080->3000/tcp'
+    }]);
 
     process.env.FAKE_DOCKER_PS = '';
     process.env.FAKE_GH_MODE = 'slow-success';

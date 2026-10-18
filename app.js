@@ -8,6 +8,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { downloadGithubArchive } = require('./lib/github');
+const { collectSystemMetrics, sampleCpuUsage } = require('./lib/system');
 const {
     parseEnv,
     validateService,
@@ -43,7 +44,7 @@ const GH_CLI_PATH = process.env.GH_CLI_PATH || 'gh';
 const DOCKER_CLI_PATH = process.env.DOCKER_CLI_PATH || 'docker';
 const loginAttempts = new Map();
 const serviceOperations = new Map();
-let previousCpuTimes = null;
+let previousCpuSnapshot = null;
 
 function runFile(file, args, options = {}) {
     return execFileAsync(file, args, {
@@ -223,21 +224,6 @@ function serviceSecrets(env) {
 function limitOutput(text, maxLength = 120_000) {
     if (text.length <= maxLength) return text;
     return `[较早的输出已截断]\n${text.slice(-maxLength)}`;
-}
-
-function cpuUsage() {
-    const cpus = os.cpus();
-    const current = cpus.reduce((total, cpu) => ({
-        idle: total.idle + cpu.times.idle,
-        total: total.total + Object.values(cpu.times).reduce((sum, value) => sum + value, 0)
-    }), { idle: 0, total: 0 });
-    const previous = previousCpuTimes;
-    previousCpuTimes = current;
-    if (!previous) return `正在采样（${cpus.length} 核）`;
-    const total = current.total - previous.total;
-    const idle = current.idle - previous.idle;
-    const percent = total > 0 ? Math.round((1 - idle / total) * 100) : 0;
-    return `${percent}% (${cpus.length} cores)`;
 }
 
 async function githubInfo() {
@@ -438,14 +424,36 @@ app.post('/api/repos/preview', async (req, res) => {
 
 app.get('/api/system', async (_req, res) => {
     try {
-        const [dockerResult, diskResult] = await Promise.all([
-            runFile(DOCKER_CLI_PATH, ['ps', '-a', '--filter', 'label=com.qorange.panel=true', '--format', '{{.Names}}\t{{.Status}}']),
-            runFile('df', ['-Pk', '/'], { timeout: 15000 })
+        const cpus = os.cpus();
+        const cpuSample = sampleCpuUsage(cpus, previousCpuSnapshot);
+        previousCpuSnapshot = cpuSample.snapshot;
+        const system = collectSystemMetrics({ cpus });
+        system.cpu.usagePercent = cpuSample.percent;
+        if (!system.disk.available) console.error('System disk probe failed: disk metrics unavailable');
+
+        const [dockerPs, dockerVersion] = await Promise.allSettled([
+            runFile(DOCKER_CLI_PATH, [
+                'ps', '-a', '--filter', 'label=com.qorange.panel=true',
+                '--format', '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+            ], { timeout: 15000 }),
+            runFile(DOCKER_CLI_PATH, ['version', '--format', '{{.Server.Version}}'], { timeout: 15000 })
         ]);
-        const containerMap = new Map(dockerResult.stdout.trim().split('\n').filter(Boolean).map(line => {
-            const [name, status] = line.split('\t');
-            return [name, status];
-        }));
+        const dockerAvailable = dockerPs.status === 'fulfilled';
+        if (!dockerAvailable) {
+            const code = dockerPs.reason && dockerPs.reason.code;
+            console.error(`Docker status probe failed: ${code || 'command failed'}`);
+        }
+        if (dockerVersion.status === 'rejected') {
+            const code = dockerVersion.reason && dockerVersion.reason.code;
+            console.error(`Docker version probe failed: ${code || 'command failed'}`);
+        }
+        const containerMap = new Map();
+        if (dockerAvailable) {
+            for (const line of dockerPs.value.stdout.trim().split('\n').filter(Boolean)) {
+                const [name, status, ports = ''] = line.split('\t');
+                if (name) containerMap.set(name, { status: status || '未知', ports });
+            }
+        }
         const registeredServices = readServices();
         let registryChanged = false;
         const services = registeredServices.map(service => {
@@ -461,7 +469,8 @@ app.get('/api/system', async (_req, res) => {
                 service.deployment = deployment;
                 registryChanged = true;
             }
-            const statusRaw = containerMap.get(containerName(service.id)) || null;
+            const container = containerMap.get(containerName(service.id));
+            const statusRaw = container ? container.status : null;
             const deploymentStatus = ['deploying', 'succeeded', 'failed'].includes(deployment.status)
                 ? deployment.status
                 : 'never';
@@ -473,22 +482,47 @@ app.get('/api/system', async (_req, res) => {
                 branch: service.branch,
                 port: service.port,
                 type: 'app',
-                status: resolveServiceStatus(statusRaw, deploymentStatus, serviceOperations.has(service.id)),
-                statusRaw: statusRaw || 'Not deployed',
+                status: dockerAvailable
+                    ? resolveServiceStatus(statusRaw, deploymentStatus, serviceOperations.has(service.id))
+                    : 'unknown',
+                statusRaw: dockerAvailable ? statusRaw || 'Not deployed' : 'Docker 不可用，状态未知',
                 deploymentStatus,
                 lastDeploymentAttemptAt: deployment.lastAttemptAt || null,
                 lastSuccessfulDeploymentAt: deployment.lastSuccessAt || null,
                 hasContainer,
+                containerPorts: container ? container.ports : '',
                 ...environmentMetadata(service.id)
             };
         });
         if (registryChanged) writeServices(registeredServices);
-        const memoryTotal = os.totalmem();
-        const memoryUsed = memoryTotal - os.freemem();
-        const memory = `${Math.round(memoryUsed / 1024 / 1024)}/${Math.round(memoryTotal / 1024 / 1024)} MB (${Math.round(memoryUsed * 100 / memoryTotal)}%)`;
-        const diskLines = diskResult.stdout.trim().split('\n');
-        const disk = diskLines.length > 1 ? diskLines[1].trim().replace(/\s+/g, ' ') : '不可用';
-        res.json({ cpu: cpuUsage(), memory, disk, services });
+        const memory = `${system.memory.used}/${system.memory.total} (${system.memory.percent ?? '未知'}%)`;
+        const disk = system.disk.available
+            ? `${system.disk.used}/${system.disk.total} (${system.disk.percent}%)`
+            : system.disk.error;
+        const managedContainers = [...containerMap.entries()].map(([name, container]) => ({
+            name,
+            status: container.status,
+            running: /^Up\b/i.test(container.status),
+            ports: container.ports || '未映射'
+        }));
+        res.json({
+            cpu: system.cpu.usagePercent === null
+                ? `正在采样（${system.cpu.cores} 核）`
+                : `${system.cpu.usagePercent}% (${system.cpu.cores} cores)`,
+            memory,
+            disk,
+            system,
+            panel: { status: 'running', uptimeSeconds: Math.floor(process.uptime()) },
+            docker: {
+                status: dockerAvailable ? 'running' : 'unavailable',
+                version: dockerVersion.status === 'fulfilled' && dockerVersion.value.stdout.trim()
+                    ? dockerVersion.value.stdout.trim()
+                    : '未知',
+                error: dockerAvailable ? null : '无法连接 Docker daemon'
+            },
+            managedContainers,
+            services
+        });
     } catch (error) {
         sendOperationError(res, error);
     }

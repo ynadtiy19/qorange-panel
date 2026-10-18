@@ -26,11 +26,10 @@
             <header class="topbar">
                 <div>
                     <div class="brand-line"><span class="brand-mark small">Q</span><h1>QOrange VPS 控制面板</h1></div>
-                    <p class="muted">管理此服务器上的应用部署</p>
+                    <p class="muted">服务器运行状态一览</p>
                 </div>
                 <div class="header-actions">
                     <span id="github-user" class="badge" hidden></span>
-                    <button id="add-service" class="button primary">+ 导入 GitHub 仓库</button>
                     <button id="refresh" class="button subtle">刷新</button>
                     <button id="logout" class="button subtle">退出登录</button>
                 </div>
@@ -38,18 +37,100 @@
 
             <div id="notice" class="notice" role="status" hidden></div>
 
-            <section class="stats-grid" aria-label="系统状态">
-                <article class="panel-card stat-card"><span class="muted">CPU</span><strong id="cpu">—</strong></article>
-                <article class="panel-card stat-card"><span class="muted">内存</span><strong id="memory">—</strong></article>
-                <article class="panel-card stat-card"><span class="muted">根目录磁盘</span><strong id="disk">—</strong></article>
+            <nav class="main-nav" aria-label="控制面板导航" role="tablist">
+                <button class="nav-tab active" type="button" role="tab" aria-selected="true" data-view="server">服务器信息</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="projects">项目</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="ssh">SSH</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="monitoring">监控</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="status">状态</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="upgrade">升级</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="firewall">防火墙</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="collaborators">协作者</button>
+                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="settings">设置</button>
+            </nav>
+
+            <section id="server-view" class="dashboard-view" role="tabpanel">
+                <section class="server-hero panel-card">
+                    <div class="hero-copy">
+                        <span class="eyebrow">当前服务器</span>
+                        <h2 id="hostname">正在读取…</h2>
+                        <p id="os-summary" class="muted">—</p>
+                    </div>
+                    <div class="hero-status">
+                        <span class="live-dot"></span>
+                        <div><strong id="panel-status">面板运行中</strong><span id="uptime" class="muted">运行时间 —</span></div>
+                    </div>
+                </section>
+
+                <section class="stats-grid" aria-label="资源使用情况">
+                    <article class="panel-card resource-card">
+                        <div class="resource-heading"><span class="resource-icon cpu-icon">CPU</span><span class="muted">处理器</span></div>
+                        <strong id="cpu-usage" class="resource-value">—</strong>
+                        <div class="progress-track"><span id="cpu-progress" class="progress-fill cpu-fill"></span></div>
+                        <p id="cpu-detail" class="muted">—</p>
+                        <p id="cpu-load" class="resource-footnote">系统负载 —</p>
+                    </article>
+                    <article class="panel-card resource-card">
+                        <div class="resource-heading"><span class="resource-icon memory-icon">内</span><span class="muted">内存</span></div>
+                        <strong id="memory-usage" class="resource-value">—</strong>
+                        <div class="progress-track"><span id="memory-progress" class="progress-fill memory-fill"></span></div>
+                        <p id="memory-detail" class="muted">—</p>
+                        <p class="resource-footnote">系统物理内存</p>
+                    </article>
+                    <article class="panel-card resource-card">
+                        <div class="resource-heading"><span class="resource-icon disk-icon">盘</span><span class="muted">根目录磁盘</span></div>
+                        <strong id="disk-usage" class="resource-value">—</strong>
+                        <div class="progress-track"><span id="disk-progress" class="progress-fill disk-fill"></span></div>
+                        <p id="disk-detail" class="muted">—</p>
+                        <p class="resource-footnote">挂载点 /</p>
+                    </article>
+                </section>
+
+                <section class="info-grid">
+                    <article class="panel-card info-panel">
+                        <div class="section-heading"><div><h2>服务器规格</h2><p class="muted">来自当前系统可读取的信息</p></div></div>
+                        <dl class="info-list">
+                            <div><dt>操作系统</dt><dd id="os-platform">—</dd></div>
+                            <div><dt>内核版本</dt><dd id="kernel-version">—</dd></div>
+                            <div><dt>系统架构</dt><dd id="architecture">—</dd></div>
+                            <div><dt>CPU 型号</dt><dd id="cpu-model">—</dd></div>
+                            <div><dt>CPU 核心</dt><dd id="cpu-cores">—</dd></div>
+                            <div><dt>本地 IPv4</dt><dd id="ipv4-addresses">—</dd></div>
+                        </dl>
+                    </article>
+                    <article class="panel-card info-panel">
+                        <div class="section-heading"><div><h2>服务状态</h2><p class="muted">仅展示本面板实际检测到的状态</p></div></div>
+                        <div class="health-list">
+                            <div class="health-row"><span><i class="health-dot online"></i>QOrange 面板</span><strong id="panel-health">运行中</strong></div>
+                            <div class="health-row"><span><i id="docker-dot" class="health-dot"></i>Docker daemon</span><strong id="docker-status">检测中</strong></div>
+                            <div class="health-row"><span>Docker 版本</span><strong id="docker-version">—</strong></div>
+                            <div class="health-row"><span>云服务商</span><strong class="unknown-value">未知</strong></div>
+                            <div class="health-row"><span>区域 / 到期 / 费用</span><strong class="unknown-value">未知 / 未配置</strong></div>
+                        </div>
+                    </article>
+                </section>
+
+                <section class="panel-card managed-panel">
+                    <div class="section-heading"><div><h2>托管服务与端口</h2><p class="muted">由 QOrange 所有权标签识别的容器；不会猜测服务类型</p></div></div>
+                    <div id="managed-containers" class="managed-list"></div>
+                    <p id="empty-managed" class="empty-state">尚未检测到 QOrange 托管容器。</p>
+                </section>
             </section>
 
-            <section class="panel-card services-panel">
+            <section id="projects-view" class="dashboard-view panel-card services-panel" role="tabpanel" hidden>
                 <div class="section-heading">
-                    <div><h2>服务</h2><p class="muted">已保存的服务会在刷新后保留；不要重复导入，使用列表中的“构建并部署”重试。环境变量只显示名称和掩码，不会再次显示值。</p></div>
+                    <div><h2>项目</h2><p class="muted">已保存的应用服务会在刷新后保留。环境变量仅显示名称和掩码，不会返回原值。</p></div>
+                    <button id="add-service" class="button primary">+ 导入 GitHub 仓库</button>
                 </div>
                 <div id="services" class="service-list"></div>
                 <p id="empty-services" class="empty-state">还没有服务。导入仓库即可开始。</p>
+            </section>
+
+            <section id="placeholder-view" class="dashboard-view panel-card placeholder-panel" role="tabpanel" hidden>
+                <span class="placeholder-icon">◌</span>
+                <h2 id="placeholder-title">功能暂未支持</h2>
+                <p class="muted">当前版本不会模拟或推测此功能的状态。此面板仅提供已验证的服务器信息和项目管理。</p>
+                <button id="return-server" class="button subtle" type="button">返回服务器信息</button>
             </section>
         </section>
     </main>
