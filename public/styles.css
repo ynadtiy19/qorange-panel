@@ -61,6 +61,7 @@ h2 { font-size: 1.05rem; }
 .modal form { display: grid; gap: 14px; }
 .modal-heading { justify-content: space-between; gap: 14px; margin-bottom: 4px; }
 .modal-heading .muted { margin-top: 5px; }
+.environment-heading-actions { display: flex; align-items: center; gap: 8px; }
 .icon-button { width: 34px; height: 34px; color: #8b949e; background: transparent; border: 0; font-size: 1.6rem; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 label { display: grid; gap: 6px; color: #c9d1d9; font-size: .8rem; }
@@ -68,6 +69,7 @@ label { display: grid; gap: 6px; color: #c9d1d9; font-size: .8rem; }
 input, select, textarea { width: 100%; color: #e6edf3; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 9px 10px; outline: none; }
 input:focus, select:focus, textarea:focus { border-color: #58a6ff; box-shadow: 0 0 0 2px rgb(56 139 253 / 20%); }
 textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+#variable-value { min-height: 68px; }
 .env-label { display: flex; align-items: baseline; gap: 8px; }
 .env-label .muted { font-size: .75rem; }
 .env-rows { display: grid; gap: 7px; }
@@ -75,11 +77,11 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
 .env-row input { min-width: 0; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; }
 .env-row button { border: 0; background: transparent; color: #ff7b72; font-size: 1.2rem; }
 .environment-table { border: 1px solid #30363d; border-radius: 8px; overflow-x: auto; }
-.environment-table-heading, .environment-row { min-width: 550px; display: grid; grid-template-columns: 1.1fr 1fr .65fr auto; gap: 12px; align-items: center; padding: 10px 12px; }
+.environment-table-heading, .environment-row { min-width: 620px; display: grid; grid-template-columns: 1.1fr 1.4fr .4fr auto; gap: 12px; align-items: center; padding: 10px 12px; }
 .environment-table-heading { color: #8b949e; background: #0d1117; font-size: .75rem; }
 .environment-row + .environment-row { border-top: 1px solid #30363d; }
 .environment-row code, .environment-row > span { overflow-wrap: anywhere; font-size: .82rem; }
-.environment-row > span:nth-child(2) { color: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+.environment-row > span:nth-child(2) { color: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .privacy-label { color: #3fb950; }
 .environment-actions { display: flex; gap: 6px; }
 .environment-actions .button { padding: 6px 8px; font-size: .76rem; }

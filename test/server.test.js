@@ -196,6 +196,65 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
         private: true
     }]);
 
+    const revealUrl = `${baseUrl}/api/services/website/env/reveal`;
+    const exportUrl = `${baseUrl}/api/services/website/env/export`;
+    for (const url of [revealUrl, exportUrl]) {
+        const unauthorizedSecretRead = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'NEW_TOKEN' })
+        });
+        assert.equal(unauthorizedSecretRead.status, 401);
+        assert.equal(unauthorizedSecretRead.headers.get('cache-control'), 'no-store');
+
+        const wrongOriginSecretRead = await fetch(url, {
+            method: 'POST',
+            headers: {
+                Cookie: cookie,
+                Origin: 'https://attacker.example',
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': loginBody.csrfToken
+            },
+            body: JSON.stringify({ key: 'NEW_TOKEN' })
+        });
+        assert.equal(wrongOriginSecretRead.status, 403);
+
+        const missingCsrfSecretRead = await fetch(url, {
+            method: 'POST',
+            headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'NEW_TOKEN' })
+        });
+        assert.equal(missingCsrfSecretRead.status, 403);
+    }
+
+    const revealed = await fetch(revealUrl, {
+        method: 'POST',
+        headers: {
+            Cookie: cookie,
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': loginBody.csrfToken
+        },
+        body: JSON.stringify({ key: 'NEW_TOKEN' })
+    });
+    assert.equal(revealed.status, 200);
+    assert.equal(revealed.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await revealed.json(), { value: replacementSecret });
+
+    const exported = await fetch(exportUrl, {
+        method: 'POST',
+        headers: {
+            Cookie: cookie,
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': loginBody.csrfToken
+        },
+        body: '{}'
+    });
+    assert.equal(exported.status, 200);
+    assert.equal(exported.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await exported.json(), { env: `NEW_TOKEN=${replacementSecret}\n` });
+
     const addedSecret = 'new-variable-secret-never-returned';
     const added = await fetch(`${baseUrl}/api/services/website/env`, {
         method: 'POST',

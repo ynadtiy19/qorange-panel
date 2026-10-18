@@ -198,4 +198,7 @@ test('panel HTML declares Simplified Chinese and translated interface labels', (
     assert.match(page, /管理员密码/);
     assert.match(page, /导入 GitHub 仓库/);
     assert.match(page, /环境变量/);
+    assert.match(page, /编辑原始环境变量/);
+    assert.match(page, /复制全部变量/);
+    assert.match(page, /<textarea id="env-text"/);
 });

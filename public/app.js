@@ -63,6 +63,7 @@ function renderEnvRows() {
     const rows = $('#env-rows');
     rows.replaceChildren();
     $('#env-error').textContent = result.errors.join(' ');
+    if (editServiceId) return;
     for (const [index, entry] of result.entries.entries()) {
         const row = document.createElement('div');
         row.className = 'env-row';
@@ -101,6 +102,7 @@ function resetServiceDialog() {
     $('#service-form').reset();
     $('#env-text').value = '';
     $('#env-rows').replaceChildren();
+    $('#env-rows').hidden = false;
     $('#env-error').textContent = '';
     $('#service-fields').hidden = false;
     $('#repo').required = true;
@@ -323,7 +325,7 @@ async function runAction(action, service) {
         environmentService = service;
         $('#environment-title').textContent = `环境变量 · ${service.name}`;
         await loadEnvironmentVariables();
-        environmentDialog.showModal();
+        if (environmentService === service) environmentDialog.showModal();
         return;
     }
     if (action === 'delete' && !window.confirm(`确定删除 ${service.name} 吗？其托管容器和私有环境变量文件将被移除，仓库源代码和镜像不会受影响。`)) return;
@@ -358,6 +360,7 @@ async function loadEnvironmentVariables() {
         list.replaceChildren();
         $('#environment-empty').hidden = result.variables.length > 0;
         for (const variable of result.variables) {
+            const service = environmentService;
             const row = document.createElement('div');
             row.className = 'environment-row';
             row.setAttribute('role', 'row');
@@ -374,6 +377,32 @@ async function loadEnvironmentVariables() {
             const actions = document.createElement('div');
             actions.className = 'environment-actions';
             actions.setAttribute('role', 'cell');
+            const reveal = document.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'button subtle';
+            reveal.textContent = '显示原值';
+            reveal.addEventListener('click', async () => {
+                if (environmentService !== service) return;
+                if (reveal.textContent === '隐藏') {
+                    value.textContent = variable.valuePresent ? variable.maskedValue : '（空值）';
+                    reveal.textContent = '显示原值';
+                    return;
+                }
+                reveal.disabled = true;
+                try {
+                    const result = await request(`/api/services/${encodeURIComponent(service.id)}/env/reveal`, {
+                        method: 'POST',
+                        body: JSON.stringify({ key: variable.key })
+                    });
+                    if (environmentService !== service) return;
+                    value.textContent = result.value || '（空值）';
+                    reveal.textContent = '隐藏';
+                } catch (error) {
+                    showNotice(error.message, true);
+                } finally {
+                    reveal.disabled = false;
+                }
+            });
             const edit = document.createElement('button');
             edit.type = 'button';
             edit.className = 'button subtle';
@@ -384,13 +413,79 @@ async function loadEnvironmentVariables() {
             remove.className = 'button danger';
             remove.textContent = '删除';
             remove.addEventListener('click', () => deleteEnvironmentVariable(variable.key));
-            actions.append(edit, remove);
+            actions.append(reveal, edit, remove);
             row.append(key, value, privacy, actions);
             list.append(row);
         }
     } catch (error) {
         showNotice(error.message, true);
         environmentDialog.close();
+    }
+}
+
+function clearEnvironmentDialog() {
+    $('#environment-variables').replaceChildren();
+    $('#environment-empty').hidden = false;
+    environmentService = null;
+}
+
+async function openRawEnvironmentEditor() {
+    if (!environmentService) return;
+    const service = environmentService;
+    const button = $('#edit-raw-environment');
+    button.disabled = true;
+    try {
+        const result = await request(`/api/services/${encodeURIComponent(service.id)}/env/export`, {
+            method: 'POST',
+            body: '{}'
+        });
+        if (environmentService !== service) return;
+        resetServiceDialog();
+        editServiceId = service.id;
+        $('#service-fields').hidden = true;
+        $('#repo').required = false;
+        $('#service-dialog-title').textContent = `编辑原始环境变量 · ${service.name}`;
+        $('#service-dialog-description').textContent = '原始环境变量包含明文。编辑不会自动保存，请确认后手动保存。';
+        $('#env-hint').textContent = '仅在可信设备上查看或编辑；关闭窗口后文本会清除。保存后需重新构建并部署。';
+        $('#save-service').textContent = '保存环境变量';
+        $('#env-rows').hidden = true;
+        $('#env-text').value = result.env;
+        $('#env-error').textContent = '';
+        environmentDialog.close();
+        serviceDialog.showModal();
+        $('#env-text').focus();
+    } catch (error) {
+        showNotice(error.message, true);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function copyAllEnvironmentVariables() {
+    if (!environmentService) return;
+    if (!window.confirm('全部环境变量原值将复制到剪贴板。请确认当前设备可信，且剪贴板内容不会被他人读取。继续？')) return;
+    if (!window.isSecureContext || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        showNotice('复制需要安全上下文和 Clipboard API；请通过 HTTPS 或 SSH 隧道访问。', true);
+        return;
+    }
+    const service = environmentService;
+    let envText = '';
+    const button = $('#copy-all-environment');
+    button.disabled = true;
+    try {
+        const result = await request(`/api/services/${encodeURIComponent(service.id)}/env/export`, {
+            method: 'POST',
+            body: '{}'
+        });
+        if (environmentService !== service) return;
+        envText = result.env;
+        await navigator.clipboard.writeText(envText);
+        showNotice('全部环境变量已复制到剪贴板。');
+    } catch (error) {
+        showNotice(`复制环境变量失败：${error.message}`, true);
+    } finally {
+        envText = '';
+        button.disabled = false;
     }
 }
 
@@ -440,6 +535,11 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => {
     try { await request('/api/logout', { method: 'POST', body: '{}' }); } catch { /* Clear the view even if the server has restarted. */ }
     csrfToken = '';
+    serviceDialog.close();
+    variableDialog.close();
+    environmentDialog.close();
+    logsDialog.close();
+    $('#logs-content').textContent = '';
     dashboard.hidden = true;
     loginView.hidden = false;
 });
@@ -503,19 +603,8 @@ $('#service-form').addEventListener('submit', async event => {
 
 $('#add-environment-variable').addEventListener('click', () => openVariableDialog());
 
-$('#replace-all-environment').addEventListener('click', () => {
-    if (!environmentService) return;
-    resetServiceDialog();
-    editServiceId = environmentService.id;
-    $('#service-fields').hidden = true;
-    $('#repo').required = false;
-    $('#service-dialog-title').textContent = `批量替换环境变量 · ${environmentService.name}`;
-    $('#service-dialog-description').textContent = '此操作会完整替换现有变量列表；系统不会读取或显示现有值。留空将清除全部变量。';
-    $('#env-hint').textContent = '请确认输入完整的新变量集合。保存后，值将从界面中清除并再次隐藏。';
-    $('#save-service').textContent = '替换全部变量';
-    environmentDialog.close();
-    serviceDialog.showModal();
-});
+$('#edit-raw-environment').addEventListener('click', openRawEnvironmentEditor);
+$('#copy-all-environment').addEventListener('click', copyAllEnvironmentVariables);
 
 $('#variable-form').addEventListener('submit', async event => {
     event.preventDefault();
@@ -551,10 +640,15 @@ document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click
 $('#return-server').addEventListener('click', () => selectView('server'));
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => {
     const dialog = button.closest('dialog');
-    if (dialog === serviceDialog) $('#env-text').value = '';
-    if (dialog === variableDialog) $('#variable-value').value = '';
     dialog.close();
 }));
+serviceDialog.addEventListener('close', resetServiceDialog);
+environmentDialog.addEventListener('close', clearEnvironmentDialog);
+variableDialog.addEventListener('close', () => {
+    $('#variable-value').value = '';
+    $('#variable-error').textContent = '';
+    editVariableKey = null;
+});
 
 async function showDashboard() {
     loginView.hidden = true;
