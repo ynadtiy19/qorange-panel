@@ -55,6 +55,7 @@ if [[ -n "${GH_CONFIG_DIR:-}" ]]; then
 else
     GH_CONFIG_DIR_VALUE="$USER_HOME/.config/gh"
 fi
+GH_CLI_PATH_VALUE="$(command -v gh)"
 if [[ "$INSTALLER_USER" != "root" ]]; then
     runuser -u "$INSTALLER_USER" -- env GH_CONFIG_DIR="$GH_CONFIG_DIR_VALUE" gh auth status >/dev/null 2>&1 ||
         fail "GitHub CLI is unavailable or '$INSTALLER_USER' is not authenticated. Run 'gh auth login' as that user, then rerun."
@@ -112,6 +113,11 @@ npm ci --omit=dev --no-audit --no-fund
 install -d -m 0755 /opt "$INSTALL_DIR"
 install -d -m 0700 "$DATA_DIR" "$ENV_DIR" "$STATE_DIR" "$STATE_DIR/builds" "$ETC_DIR"
 chmod 700 "$DATA_DIR" "$ENV_DIR" "$STATE_DIR" "$STATE_DIR/builds" "$ETC_DIR"
+for state_file in "$ETC_DIR/session.key" "$ETC_DIR/auth.json"; do
+    if [[ -L "$state_file" ]]; then
+        fail "$state_file must be a regular file, not a symbolic link."
+    fi
+done
 if [[ ! -f "$ETC_DIR/session.key" ]]; then
     openssl rand -hex 32 > "$TMP_DIR/session.key"
     install -m 0600 "$TMP_DIR/session.key" "$ETC_DIR/session.key"
@@ -140,20 +146,40 @@ systemd_quote() {
     printf '"%s"' "$escaped"
 }
 NODE_PATH="$(command -v node)"
-PANEL_ENV_TMP="$TMP_DIR/panel.env"
-{
-    printf 'PORT=8888\n'
-    printf 'BIND_ADDRESS=0.0.0.0\n'
-    printf 'DATA_DIR=/data/apps/qorange-panel\n'
-    printf 'ENV_DIR=/data/apps/env\n'
-    printf 'WORKSPACE_DIR=/var/lib/qorange-panel/builds\n'
-    printf 'AUTH_FILE=/etc/qorange-panel/auth.json\n'
-    printf 'SESSION_KEY_FILE=/etc/qorange-panel/session.key\n'
-    printf 'COOKIE_SECURE=0\n'
-    printf 'HOME=%s\n' "$(systemd_quote "$USER_HOME")"
-    printf 'GH_CONFIG_DIR=%s\n' "$(systemd_quote "$GH_CONFIG_DIR_VALUE")"
-} > "$PANEL_ENV_TMP"
-install -m 0600 "$PANEL_ENV_TMP" "$ETC_DIR/panel.env"
+PANEL_ENV="$ETC_DIR/panel.env"
+if [[ -L "$PANEL_ENV" ]]; then
+    fail "$PANEL_ENV must be a regular file, not a symbolic link."
+fi
+if [[ ! -e "$PANEL_ENV" ]]; then
+    PANEL_ENV_TMP="$TMP_DIR/panel.env"
+    {
+        printf 'PORT=8888\n'
+        printf 'BIND_ADDRESS=0.0.0.0\n'
+        printf 'DATA_DIR=/data/apps/qorange-panel\n'
+        printf 'ENV_DIR=/data/apps/env\n'
+        printf 'WORKSPACE_DIR=/var/lib/qorange-panel/builds\n'
+        printf 'AUTH_FILE=/etc/qorange-panel/auth.json\n'
+        printf 'SESSION_KEY_FILE=/etc/qorange-panel/session.key\n'
+        printf 'COOKIE_SECURE=0\n'
+        printf 'HOME=%s\n' "$(systemd_quote "$USER_HOME")"
+        printf 'GH_CONFIG_DIR=%s\n' "$(systemd_quote "$GH_CONFIG_DIR_VALUE")"
+        printf 'GH_CLI_PATH=%s\n' "$(systemd_quote "$GH_CLI_PATH_VALUE")"
+    } > "$PANEL_ENV_TMP"
+    install -m 0600 "$PANEL_ENV_TMP" "$PANEL_ENV"
+else
+    [[ -f "$PANEL_ENV" ]] || fail "$PANEL_ENV is not a regular file; refusing to replace it."
+    for env_key in HOME GH_CONFIG_DIR GH_CLI_PATH; do
+        if ! grep -q "^${env_key}=" "$PANEL_ENV"; then
+            case "$env_key" in
+                HOME) env_value="$USER_HOME" ;;
+                GH_CONFIG_DIR) env_value="$GH_CONFIG_DIR_VALUE" ;;
+                GH_CLI_PATH) env_value="$GH_CLI_PATH_VALUE" ;;
+            esac
+            printf '%s=%s\n' "$env_key" "$(systemd_quote "$env_value")" >> "$PANEL_ENV"
+        fi
+    done
+    chmod 0600 "$PANEL_ENV"
+fi
 
 UNIT_TMP="$TMP_DIR/qorange-panel.service"
 cat > "$UNIT_TMP" <<EOF

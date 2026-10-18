@@ -34,6 +34,7 @@ const SESSION_KEY_FILE = process.env.SESSION_KEY_FILE || path.join(DATA_DIR, 'se
 const SERVICE_FILE = path.join(DATA_DIR, 'services.json');
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const MAX_ENV_BYTES = 64 * 1024;
+const GH_CLI_PATH = process.env.GH_CLI_PATH || 'gh';
 const loginAttempts = new Map();
 const serviceOperations = new Map();
 let previousCpuTimes = null;
@@ -60,7 +61,7 @@ function readJson(file, fallback) {
 
 function readServices() {
     const config = readJson(SERVICE_FILE, { services: [] });
-    if (!Array.isArray(config.services)) throw new Error('Service registry is invalid');
+    if (!Array.isArray(config.services)) throw new Error('服务注册表无效');
     return config.services;
 }
 
@@ -94,7 +95,7 @@ function writeServiceEnv(id, envText) {
 function serviceOr404(id, res) {
     const service = readServices().find(item => item.id === id);
     if (!service) {
-        res.status(404).json({ error: 'Service not found' });
+        res.status(404).json({ error: '未找到该服务' });
         return null;
     }
     return service;
@@ -110,7 +111,7 @@ function safeError(error, secrets = []) {
 function sendOperationError(res, error, secrets = {}) {
     const message = safeError(error, secrets);
     console.error(`Panel operation failed: ${message}`);
-    res.status(error.statusCode || error.status || 500).json({ error: message || 'Operation failed' });
+    res.status(error.statusCode || error.status || 500).json({ error: message || '操作失败' });
 }
 
 function setSecurityHeaders(_req, res, next) {
@@ -146,7 +147,7 @@ function currentSession(req) {
 function requireAdmin(req, res, next) {
     try {
         req.panelSession = currentSession(req);
-        if (!req.panelSession) return res.status(401).json({ error: 'Authentication required' });
+        if (!req.panelSession) return res.status(401).json({ error: '需要先登录' });
         next();
     } catch (error) {
         next(error);
@@ -154,17 +155,17 @@ function requireAdmin(req, res, next) {
 }
 
 function requireSameOrigin(req, res, next) {
-    if (!requestOriginMatches(req)) return res.status(403).json({ error: 'Request origin rejected' });
+    if (!requestOriginMatches(req)) return res.status(403).json({ error: '请求来源验证失败' });
     next();
 }
 
 function requireCsrf(req, res, next) {
     if (req.method === 'GET' || req.method === 'HEAD') return next();
-    if (!requestOriginMatches(req)) return res.status(403).json({ error: 'Request origin rejected' });
+    if (!requestOriginMatches(req)) return res.status(403).json({ error: '请求来源验证失败' });
     const token = req.get('x-csrf-token') || '';
     const expected = req.panelSession.csrf;
     if (token.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
-        return res.status(403).json({ error: 'CSRF token rejected' });
+        return res.status(403).json({ error: 'CSRF 令牌验证失败' });
     }
     next();
 }
@@ -173,7 +174,7 @@ function loginLimit(req, res, next) {
     const ip = req.socket.remoteAddress || 'unknown';
     const entry = loginAttempts.get(ip);
     const now = Date.now();
-    if (entry && entry.blockedUntil > now) return res.status(429).json({ error: 'Too many login attempts; try again later' });
+    if (entry && entry.blockedUntil > now) return res.status(429).json({ error: '登录尝试次数过多，请稍后重试' });
     if (!entry || entry.windowStart + 15 * 60 * 1000 < now) loginAttempts.set(ip, { count: 0, windowStart: now, blockedUntil: 0 });
     next();
 }
@@ -192,7 +193,7 @@ function serviceSecrets(env) {
 
 function limitOutput(text, maxLength = 120_000) {
     if (text.length <= maxLength) return text;
-    return `[Earlier output truncated]\n${text.slice(-maxLength)}`;
+    return `[较早的输出已截断]\n${text.slice(-maxLength)}`;
 }
 
 function cpuUsage() {
@@ -203,7 +204,7 @@ function cpuUsage() {
     }), { idle: 0, total: 0 });
     const previous = previousCpuTimes;
     previousCpuTimes = current;
-    if (!previous) return `Sampling (${cpus.length} cores)`;
+    if (!previous) return `正在采样（${cpus.length} 核）`;
     const total = current.total - previous.total;
     const idle = current.idle - previous.idle;
     const percent = total > 0 ? Math.round((1 - idle / total) * 100) : 0;
@@ -211,10 +212,10 @@ function cpuUsage() {
 }
 
 async function githubInfo() {
-    await runFile('gh', ['auth', 'status'], { timeout: 15000 });
+    await runFile(GH_CLI_PATH, ['auth', 'status'], { timeout: 15000 });
     const [userResult, repoResult] = await Promise.all([
-        runFile('gh', ['api', 'user', '--jq', '{login: .login, avatar_url: .avatar_url, name: .name}'], { timeout: 30000 }),
-        runFile('gh', ['repo', 'list', '--limit', '1000', '--json', 'name,nameWithOwner,url,isPrivate,defaultBranchRef'], { timeout: 60000 })
+        runFile(GH_CLI_PATH, ['api', 'user', '--jq', '{login: .login, avatar_url: .avatar_url, name: .name}'], { timeout: 30000 }),
+        runFile(GH_CLI_PATH, ['repo', 'list', '--limit', '1000', '--json', 'name,nameWithOwner,url,isPrivate,defaultBranchRef'], { timeout: 60000 })
     ]);
     return { user: JSON.parse(userResult.stdout), repos: JSON.parse(repoResult.stdout) };
 }
@@ -227,7 +228,7 @@ async function assertOwnedContainer(name, id) {
             name
         ], { timeout: 15000 });
         if (result.stdout.trim() !== `true|${id}`) {
-            const error = new Error('A container with this name exists but is not managed by QOrange; it was left untouched');
+            const error = new Error('同名容器并非由 QOrange 管理，已保持原样且未作更改');
             error.statusCode = 409;
             throw error;
         }
@@ -241,7 +242,7 @@ async function assertOwnedContainer(name, id) {
 
 async function withServiceLock(id, operation) {
     if (serviceOperations.has(id)) {
-        const error = new Error('Another operation for this service is already running');
+        const error = new Error('该服务的另一项操作正在进行中');
         error.statusCode = 409;
         throw error;
     }
@@ -261,19 +262,19 @@ async function performDeploy(service) {
     const workspace = fs.mkdtempSync(path.join(WORKSPACE_DIR, `${service.id}-`));
     const archive = path.join(workspace, 'repository.tar.gz');
     const source = path.join(workspace, 'source');
-    const logs = [`Starting deployment for ${service.name}.`];
+    const logs = [`开始部署 ${service.name}。`];
     try {
         fs.mkdirSync(source);
         try {
-            await runFile('gh', ['auth', 'status'], { timeout: 15000 });
+            await runFile(GH_CLI_PATH, ['auth', 'status'], { timeout: 15000 });
         } catch (error) {
-            throw new Error(`GitHub CLI unavailable or not authenticated: ${safeError(error, secrets)}`);
+            throw new Error(`GitHub CLI 不可用或尚未登录：${safeError(error, secrets)}`);
         }
         const endpoint = `repos/${service.repo}/tarball/${service.branch}`;
-        logs.push('Downloading the selected GitHub branch.');
-        await runFile('gh', ['api', '--header', 'Accept: application/vnd.github+json', '--output', archive, endpoint], { timeout: 5 * 60 * 1000 });
+        logs.push('正在下载所选 GitHub 分支。');
+        await runFile(GH_CLI_PATH, ['api', '--header', 'Accept: application/vnd.github+json', '--output', archive, endpoint], { timeout: 5 * 60 * 1000 });
         await runFile('tar', ['-xzf', archive, '-C', source, '--strip-components=1'], { timeout: 5 * 60 * 1000 });
-        logs.push('Building the application image.');
+        logs.push('正在构建应用镜像。');
         const build = await runFile('docker', [
             'build', '--tag', `qorange-${service.id}:latest`,
             '--label', 'com.qorange.panel=true',
@@ -295,7 +296,7 @@ async function performDeploy(service) {
         if (Object.keys(env).length) args.push('--env-file', envFilePath(service.id));
         args.push(`qorange-${service.id}:latest`);
         const run = await runFile('docker', args, { timeout: 60000 });
-        logs.push(`Container started: ${run.stdout.trim()}`);
+        logs.push(`容器已启动：${run.stdout.trim()}`);
         return limitOutput(redactSecrets(logs.join('\n'), secrets));
     } finally {
         fs.rmSync(workspace, { recursive: true, force: true });
@@ -327,7 +328,7 @@ app.post('/api/login', requireSameOrigin, loginLimit, async (req, res, next) => 
         const password = req.body && req.body.password;
         if (typeof password !== 'string' || password.length > 1024 || !(await verifyPassword(password, readJson(AUTH_FILE)))) {
             recordFailedLogin(req);
-            return res.status(401).json({ error: 'Invalid password' });
+            return             res.status(401).json({ error: '密码错误' });
         }
         loginAttempts.delete(req.socket.remoteAddress || 'unknown');
         const session = createSession(fs.readFileSync(SESSION_KEY_FILE));
@@ -349,7 +350,7 @@ app.get('/api/github/info', async (_req, res) => {
     try {
         res.json(await githubInfo());
     } catch (error) {
-        sendOperationError(res, new Error(`GitHub CLI unavailable or not authenticated: ${safeError(error)}`));
+        sendOperationError(res, new Error(`GitHub CLI 不可用或尚未登录：${safeError(error)}`));
     }
 });
 
@@ -380,7 +381,7 @@ app.get('/api/system', async (_req, res) => {
         const memoryUsed = memoryTotal - os.freemem();
         const memory = `${Math.round(memoryUsed / 1024 / 1024)}/${Math.round(memoryTotal / 1024 / 1024)} MB (${Math.round(memoryUsed * 100 / memoryTotal)}%)`;
         const diskLines = diskResult.stdout.trim().split('\n');
-        const disk = diskLines.length > 1 ? diskLines[1].trim().replace(/\s+/g, ' ') : 'Unavailable';
+        const disk = diskLines.length > 1 ? diskLines[1].trim().replace(/\s+/g, ' ') : '不可用';
         res.json({ cpu: cpuUsage(), memory, disk, services });
     } catch (error) {
         sendOperationError(res, error);
@@ -392,9 +393,9 @@ app.post('/api/services', async (req, res) => {
         const input = req.body || {};
         const service = validateService(input);
         const services = readServices();
-        if (services.some(item => item.id === service.id)) return res.status(409).json({ error: 'Service ID already exists' });
-        if (fs.existsSync(envFilePath(service.id))) return res.status(409).json({ error: 'An environment file already exists for this service ID' });
-        if (input.env !== undefined && typeof input.env !== 'string') return res.status(400).json({ error: 'Environment variables must be text' });
+        if (services.some(item => item.id === service.id)) return res.status(409).json({ error: '服务 ID 已存在' });
+        if (fs.existsSync(envFilePath(service.id))) return res.status(409).json({ error: '该服务 ID 对应的环境变量文件已存在' });
+        if (input.env !== undefined && typeof input.env !== 'string') return res.status(400).json({ error: '环境变量必须是文本' });
         writeServiceEnv(service.id, input.env || '');
         try {
             services.push(service);
@@ -412,9 +413,9 @@ app.post('/api/services', async (req, res) => {
 app.put('/api/services/:id/env', async (req, res) => {
     try {
         const id = validateServiceId(req.params.id);
-        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: 'Service not found' });
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
         if (typeof req.body.env !== 'string' || Buffer.byteLength(req.body.env, 'utf8') > MAX_ENV_BYTES) {
-            return res.status(400).json({ error: 'Environment variables must be text smaller than 64 KB' });
+            return res.status(400).json({ error: '环境变量必须是小于 64 KB 的文本' });
         }
         await withServiceLock(id, () => writeServiceEnv(id, req.body.env));
         res.json({ success: true });
@@ -432,7 +433,7 @@ app.post('/api/services/:id/action', async (req, res) => {
         if (!service) return;
         const action = req.body && req.body.action;
         if (!['build', 'delete', 'start', 'stop', 'restart', 'logs'].includes(action)) {
-            return res.status(400).json({ error: 'Unsupported action' });
+            return res.status(400).json({ error: '不支持此操作' });
         }
         await withServiceLock(id, async () => {
             secrets = readServiceEnv(id);
@@ -456,7 +457,7 @@ app.post('/api/services/:id/action', async (req, res) => {
             }
             const exists = await assertOwnedContainer(name, id);
             if (!exists) {
-                res.status(404).json({ error: 'Service container is not deployed' });
+                res.status(404).json({ error: '该服务尚未部署容器' });
                 return;
             }
             if (action === 'logs') {
@@ -472,7 +473,7 @@ app.post('/api/services/:id/action', async (req, res) => {
     }
 });
 
-app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
+app.use('/api', (_req, res) => res.status(404).json({ error: '未找到 API 路由' }));
 app.use((error, _req, res, _next) => {
     sendOperationError(res, error);
 });

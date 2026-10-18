@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>QOrange VPS Panel</title>
+    <title>QOrange VPS 控制面板</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
 </head>
@@ -12,12 +12,12 @@
     <main class="shell">
         <section id="login" class="login-card panel-card" hidden>
             <div class="brand-mark">Q</div>
-            <h1>QOrange Panel</h1>
-            <p class="muted">Sign in with the administrator password printed by the installer.</p>
+            <h1>QOrange 控制面板</h1>
+            <p class="muted">请输入安装程序首次显示的管理员密码。</p>
             <form id="login-form">
-                <label for="password">Administrator password</label>
+                <label for="password">管理员密码</label>
                 <input id="password" name="password" type="password" autocomplete="current-password" required>
-                <button class="button primary full" type="submit">Sign in</button>
+                <button class="button primary full" type="submit">登录</button>
                 <p id="login-error" class="error" role="alert"></p>
             </form>
         </section>
@@ -25,31 +25,31 @@
         <section id="dashboard" hidden>
             <header class="topbar">
                 <div>
-                    <div class="brand-line"><span class="brand-mark small">Q</span><h1>QOrange VPS Panel</h1></div>
-                    <p class="muted">Private deployments on this server</p>
+                    <div class="brand-line"><span class="brand-mark small">Q</span><h1>QOrange VPS 控制面板</h1></div>
+                    <p class="muted">管理此服务器上的应用部署</p>
                 </div>
                 <div class="header-actions">
                     <span id="github-user" class="badge" hidden></span>
-                    <button id="add-service" class="button primary">+ Import GitHub repository</button>
-                    <button id="refresh" class="button subtle">Refresh</button>
-                    <button id="logout" class="button subtle">Sign out</button>
+                    <button id="add-service" class="button primary">+ 导入 GitHub 仓库</button>
+                    <button id="refresh" class="button subtle">刷新</button>
+                    <button id="logout" class="button subtle">退出登录</button>
                 </div>
             </header>
 
             <div id="notice" class="notice" role="status" hidden></div>
 
-            <section class="stats-grid" aria-label="System status">
+            <section class="stats-grid" aria-label="系统状态">
                 <article class="panel-card stat-card"><span class="muted">CPU</span><strong id="cpu">—</strong></article>
-                <article class="panel-card stat-card"><span class="muted">Memory</span><strong id="memory">—</strong></article>
-                <article class="panel-card stat-card"><span class="muted">Root disk</span><strong id="disk">—</strong></article>
+                <article class="panel-card stat-card"><span class="muted">内存</span><strong id="memory">—</strong></article>
+                <article class="panel-card stat-card"><span class="muted">根目录磁盘</span><strong id="disk">—</strong></article>
             </section>
 
             <section class="panel-card services-panel">
                 <div class="section-heading">
-                    <div><h2>Services</h2><p class="muted">Builds use the authenticated GitHub CLI account.</p></div>
+                    <div><h2>服务</h2><p class="muted">构建时使用已登录的 GitHub CLI 账户。</p></div>
                 </div>
                 <div id="services" class="service-list"></div>
-                <p id="empty-services" class="empty-state">No services yet. Import a repository to get started.</p>
+                <p id="empty-services" class="empty-state">还没有服务。导入仓库即可开始。</p>
             </section>
         </section>
     </main>
@@ -57,37 +57,37 @@
     <dialog id="service-dialog" class="modal">
         <form id="service-form" method="dialog">
             <div class="modal-heading">
-                <div><h2 id="service-dialog-title">Import repository</h2><p id="service-dialog-description" class="muted"></p></div>
-                <button type="button" class="icon-button" data-close aria-label="Close">×</button>
+                <div><h2 id="service-dialog-title">导入仓库</h2><p id="service-dialog-description" class="muted"></p></div>
+                <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
             </div>
             <div id="service-fields" class="form-grid">
                 <label class="wide">GitHub repository
-                    <select id="repo" required><option value="">Loading repositories…</option></select>
+                    <select id="repo" required><option value="">正在加载仓库…</option></select>
                 </label>
-                <label>Service name<input id="name" maxlength="120" required></label>
-                <label>Service ID<input id="id" pattern="[a-z0-9][a-z0-9_-]{0,62}" required></label>
-                <label>Branch<input id="branch" maxlength="255" required value="main"></label>
-                <label>Host port (optional)<input id="port" inputmode="numeric" placeholder="8080 or 8080:3000"></label>
+                <label>服务名称<input id="name" maxlength="120" required></label>
+                <label>服务 ID<input id="id" pattern="[a-z0-9][a-z0-9_-]{0,62}" required></label>
+                <label>分支<input id="branch" maxlength="255" required value="main"></label>
+                <label>主机端口（可选）<input id="port" inputmode="numeric" placeholder="8080 或 8080:3000"></label>
             </div>
-            <label class="env-label" for="env-text">Environment variables <span class="muted">One KEY=VALUE per line</span></label>
+            <label class="env-label" for="env-text">环境变量 <span class="muted">每行一个 KEY=VALUE</span></label>
             <textarea id="env-text" rows="5" spellcheck="false" placeholder="PORT=8080&#10;NODE_ENV=production"></textarea>
-            <p id="env-hint" class="muted">Values are saved in a private file on the server and are never shown again.</p>
+            <p id="env-hint" class="muted">变量将保存在服务器的私有文件中，保存后不会再次显示。</p>
             <div id="env-error" class="error" role="alert"></div>
             <div id="env-rows" class="env-rows" aria-live="polite"></div>
             <div class="modal-actions">
-                <button type="button" class="button subtle" data-close>Cancel</button>
-                <button id="save-service" type="submit" class="button primary">Save service</button>
+                <button type="button" class="button subtle" data-close>取消</button>
+                <button id="save-service" type="submit" class="button primary">保存服务</button>
             </div>
         </form>
     </dialog>
 
     <dialog id="logs-dialog" class="modal log-modal">
         <div class="modal-heading">
-            <div><h2 id="logs-title">Service logs</h2><p class="muted">Known environment values are redacted from output.</p></div>
-            <button type="button" class="icon-button" data-close aria-label="Close">×</button>
+            <div><h2 id="logs-title">服务日志</h2><p class="muted">已知的环境变量值会从输出中隐藏。</p></div>
+            <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
         </div>
         <pre id="logs-content"></pre>
-        <div class="modal-actions"><button type="button" class="button subtle" data-close>Close</button></div>
+        <div class="modal-actions"><button type="button" class="button subtle" data-close>关闭</button></div>
     </dialog>
 </body>
 </html>

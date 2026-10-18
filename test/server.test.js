@@ -82,7 +82,9 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
         },
         body: JSON.stringify({ id: 'website', name: 'Website', repo: 'org/site', branch: '../unsafe', env: 'TOKEN=not-echoed' })
     });
-    assert.equal(invalidInput.status, 400, await invalidInput.text());
+    const invalidInputBody = await invalidInput.json();
+    assert.equal(invalidInput.status, 400);
+    assert.match(invalidInputBody.error, /分支名称无效/);
 
     const secret = 'service-secret-never-in-response';
     const created = await fetch(`${baseUrl}/api/services`, {
