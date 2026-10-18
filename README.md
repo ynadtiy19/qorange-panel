@@ -1,44 +1,44 @@
-# 🍊 QOrange Panel (Nano PaaS)
+# QOrange VPS Panel
 
-专为小内存（1G ~ 2G）VPS 打造的轻量级私有化控制面板与持续交付（CI/CD）中枢。
+QOrange is a small, single-server deployment dashboard. Sign in to the panel, pick a repository from the authenticated GitHub CLI account (including private repositories), accept its default branch or choose another branch, set an optional port mapping, and build/deploy it. Service controls include start, stop, restart, logs, replacing environment variables, and deleting the managed container.
 
-## 特性
-- 极低资源占用（运行时内存 < 40MB）
-- GitHub Webhook 本地构建与自动清理旧镜像
-- 容器生命周期可视化管理（日志、重启、构建）
-- 控制台自身平滑热升级
+## Install on a Linux VPS
 
-如何把这套代码推送到 GitHub 并让服务器接管？
+Requirements: Linux with systemd, Node.js 18+, Docker Engine already installed and running, and GitHub CLI (`gh`) already authenticated as the user running the command. Run `gh auth login` before installing. The installer checks these prerequisites and recognizes its own prior installation plus the legacy QOrange directory; it refuses to overwrite an unrelated `/opt/qorange-panel`.
 
-第一步：在 Mac 本地推送到你的 GitHub
+Run this on the VPS:
 
-1.  在 GitHub 上点击新建一个公开仓库，比如命名为 qorange-panel。
-2.  在你保存了上面这几个文件的 Mac 目录里，打开终端执行：
-    git init
-    git add .
-    git commit -m "feat: initial commit of qorange panel"
-    git branch -M main
-    git remote add origin https://github.com/ynadtiy19/qorange-panel.git
-    git push -u origin main
+```sh
+curl --fail --show-error --location https://raw.githubusercontent.com/ynadtiy19/qorange-panel/main/install.sh --output /tmp/qorange-panel-install.sh && sudo bash /tmp/qorange-panel-install.sh
+```
 
-第二步：在 VPS 上彻底接管并跑通自我更新链路
+After the systemd service passes its local health check, the installer prints the panel URL and, on first installation, a randomly generated administrator password once. Save that password. Re-running the installer preserves the existing administrator password and service registry. If public-IP detection is unavailable, use the printed localhost URL with the SSH tunnel command shown by the installer.
 
-回到你当前的 VPS 终端里，执行以下几行，把原本的临时目录换成正规的 Git 仓库目录：
+The installer manages `/opt/qorange-panel`, `/etc/qorange-panel`, `/var/lib/qorange-panel`, `/data/apps/qorange-panel`, and `/data/apps/env`; it does not remove `/data/apps/*`, stop or replace existing containers, or read, modify, or delete `/data/mongo_data`. For a recognized legacy QOrange config, application service metadata is migrated, env values are moved to mode-0600 files under `/data/apps/env`, the old weak `authSecret` is discarded, and database `runCmd` entries are ignored and never executed. Existing MongoDB containers remain untouched.
 
-# 1. 停用之前的旧进程并清理临时目录
-systemctl stop qorange-panel
-rm -rf /opt/qorange-panel
+## Secure access
 
-# 2. 从你刚建好的公开仓库克隆下来
-git clone https://github.com/ynadtiy19/qorange-panel.git /opt/qorange-panel
-cd /opt/qorange-panel
+The installer binds port `8888` to all interfaces and initially uses HTTP so the first login works. Do **not** expose the panel to the public internet over plain HTTP: credentials and session traffic would be unencrypted. Prefer an HTTPS reverse proxy with a firewall allowing port 443 only, proxying to `127.0.0.1:8888`; then set `COOKIE_SECURE=1` in `/etc/qorange-panel/panel.env` and run `sudo systemctl restart qorange-panel`. For temporary access before configuring HTTPS, use an SSH tunnel:
 
-# 3. 安装依赖并启动
+```sh
+ssh -L 8888:127.0.0.1:8888 <your-vps>
+```
+
+Open `http://127.0.0.1:8888` on your computer. Admin API requests require a signed, HttpOnly, SameSite session cookie, same-origin checks, and a CSRF token. The initial password is stored only as a scrypt hash. GitHub credentials are read from the authenticated `gh` configuration; do not paste a GitHub token into the panel.
+
+## Environment variables and deployments
+
+Enter one `KEY=VALUE` per line. The editor immediately renders editable key/value rows. Environment files are stored at `/data/apps/env/<service-id>.env` with restrictive permissions; they are never included in service listings or returned by the API. Existing values are not fetched back into the browser: replacing them requires entering the complete replacement set. Known values are redacted from container logs and operation errors.
+
+Deployments fetch GitHub branch archives through `gh api`, so private-repository access uses the authenticated GitHub CLI without embedding credentials in Git URLs or shell commands. Docker operations use argument arrays and only manage containers labelled as QOrange-owned. Deleting a service removes that managed container and its environment file; it deliberately leaves images and build/source data alone. There is no unauthenticated webhook endpoint; deploys are initiated from the authenticated panel.
+
+## Development and checks
+
+```sh
 npm install
-systemctl restart qorange-panel
+npm test
+npm run check
+bash -n install.sh
+```
 
-之后的神仙体验：
-
-  - 想加功能、改 UI？ 在 Mac 本地 VS Code 里随便改，改完 git push；
-  - 让服务器更新？ 打开浏览器 http://103.114.160.48:8888，点击右上角的 【🚀 升级控制台本身】；
-  - 面板会自动在后台拉取最新代码并静默重启，几秒钟后刷新页面，最新功能就立刻生效了！
+`/healthz` is a minimal, unauthenticated local health endpoint. All service, GitHub, and system administration APIs require authentication.
