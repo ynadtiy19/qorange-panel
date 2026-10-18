@@ -786,6 +786,7 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
 
     const staticPage = await fetch(`${baseUrl}/`);
     assert.equal(staticPage.status, 200);
+    assert.equal(staticPage.headers.get('cache-control'), 'no-store');
     assert.match(staticPage.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     const staticContent = await staticPage.text();
     assert.equal(staticContent.includes(secret), false);
@@ -796,4 +797,13 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const clientScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
     assert.match(clientScript, /const selectedView = view === 'projects' \? 'projects' : 'server'/);
 
+    const servedClient = await fetch(`${baseUrl}/app.js`);
+    assert.equal(servedClient.status, 200);
+    assert.equal(servedClient.headers.get('cache-control'), 'no-store');
+    const servedClientText = await servedClient.text();
+    assert.match(servedClientText, /\$\('#github-accounts-button'\)\.addEventListener\('click'/);
+    const serviceSubmitSource = servedClientText
+        .split("$('#service-form').addEventListener('submit'")[1]
+        .split('\n});', 1)[0];
+    assert.equal(serviceSubmitSource.includes("$('#github-accounts-button')"), false);
 });

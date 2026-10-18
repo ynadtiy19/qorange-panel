@@ -412,7 +412,13 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.json({ limit: MAX_ENV_BYTES + 32 * 1024, type: 'application/json' }));
-app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+app.use(express.static(path.join(__dirname, 'public'), {
+    etag: false,
+    maxAge: 0,
+    setHeaders(res) {
+        res.setHeader('Cache-Control', 'no-store');
+    }
+}));
 
 app.get('/healthz', (_req, res) => res.status(200).type('text/plain').send('ok'));
 
