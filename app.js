@@ -264,7 +264,11 @@ async function inspectBranchRecipe(repo, branch) {
 }
 
 function isContainerNotFound(error) {
-    return /No such (?:object|container)(?::|\b)/i.test(error.stderr || error.message || '');
+    return /No such (?:object|container)(?::|\b)/i.test(`${error.stderr || ''}\n${error.message || ''}`);
+}
+
+function isContainerNameConflict(error) {
+    return /container name .* is already in use/i.test(`${error.stderr || ''}\n${error.message || ''}`);
 }
 
 async function ownedContainerId(name, id) {
@@ -276,7 +280,7 @@ async function ownedContainerId(name, id) {
         ], { timeout: 15000 });
         const [containerId, panelLabel, serviceLabel] = result.stdout.trim().split('|');
         if (!/^[a-f0-9]{64}$/i.test(containerId || '') || panelLabel !== 'true' || serviceLabel !== id) {
-            const error = new Error('同名容器并非由 QOrange 管理，已保持原样且未作更改');
+            const error = new Error('同名容器并非由 QOrange 管理，已保持原样且未作更改。请手动检查并重命名或移除该容器后重试；QOrange 不会覆盖非托管容器');
             error.statusCode = 409;
             throw error;
         }
@@ -294,6 +298,27 @@ async function removeOwnedContainer(containerId) {
             await runFile(DOCKER_CLI_PATH, [action, containerId], { timeout: 60000 });
         } catch (error) {
             if (!isContainerNotFound(error)) throw error;
+        }
+    }
+}
+
+async function runContainer(name, id, args) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            return await runFile(DOCKER_CLI_PATH, args, { timeout: 60000 });
+        } catch (error) {
+            if (!isContainerNameConflict(error)) throw error;
+            const existingContainerId = await ownedContainerId(name, id);
+            if (existingContainerId) {
+                const conflict = new Error('部署期间同名 QOrange 容器已出现，未对其作更改。请确认没有其他部署正在运行后重试');
+                conflict.statusCode = 409;
+                throw conflict;
+            }
+            if (attempt === 1) {
+                const conflict = new Error('容器名称冲突，但重新检查时容器已消失。请稍后重试部署');
+                conflict.statusCode = 409;
+                throw conflict;
+            }
         }
     }
 }
@@ -350,7 +375,7 @@ async function performDeploy(service) {
         if (service.port) args.push('--publish', service.port);
         if (Object.keys(env).length) args.push('--env-file', envFilePath(service.id));
         args.push(`qorange-${service.id}:latest`);
-        const run = await runFile(DOCKER_CLI_PATH, args, { timeout: 60000 });
+        const run = await runContainer(name, service.id, args);
         logs.push(`容器已启动：${run.stdout.trim()}`);
         return limitOutput(redactSecrets(logs.join('\n'), secrets));
     } finally {
