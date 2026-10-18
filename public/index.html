@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QOrange 控制中心</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style> body { background-color: #0d1117; color: #c9d1d9; } </style>
+</head>
+<body class="p-6">
+    <div id="app" class="max-w-5xl mx-auto space-y-6">
+        <!-- 顶部导航 -->
+        <header class="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-gray-700 pb-4 gap-4">
+            <div>
+                <h1 class="text-2xl font-bold text-orange-400">🍊 QOrange 独立控制台</h1>
+                <p class="text-xs text-gray-400 mt-1">专为低配小内存 VPS 设计的私有化微型 PaaS</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+                <button @click="triggerAction('selfUpdate', '')" class="bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 text-xs px-3 py-1.5 rounded border border-indigo-700 transition">
+                    🚀 升级控制台本身
+                </button>
+                <button @click="triggerAction('cleanDisk', '')" class="bg-red-900/60 hover:bg-red-800 text-red-200 text-xs px-3 py-1.5 rounded border border-red-700 transition">
+                    🧹 深度清理 Docker
+                </button>
+                <button @click="fetchSystem" class="bg-gray-800 hover:bg-gray-700 text-xs px-3 py-1.5 rounded border border-gray-600 transition">
+                    🔄 刷新状态
+                </button>
+            </div>
+        </header>
+
+        <!-- 系统资源卡片 -->
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-gray-900 p-4 rounded-xl border border-gray-800">
+                <div class="text-xs text-gray-500 font-medium">CPU 占用率</div>
+                <div class="text-xl font-bold text-blue-400 mt-1">{{ sys.cpu || '...' }}</div>
+            </div>
+            <div class="bg-gray-900 p-4 rounded-xl border border-gray-800">
+                <div class="text-xs text-gray-500 font-medium">内存状态 (已用/总计)</div>
+                <div class="text-xl font-bold text-green-400 mt-1">{{ sys.memory || '...' }}</div>
+            </div>
+            <div class="bg-gray-900 p-4 rounded-xl border border-gray-800">
+                <div class="text-xs text-gray-500 font-medium">系统磁盘占比</div>
+                <div class="text-xl font-bold text-yellow-400 mt-1">{{ sys.disk || '...' }}</div>
+            </div>
+        </section>
+
+        <!-- 服务矩阵列表 -->
+        <section class="bg-gray-900 rounded-xl p-6 border border-gray-800 space-y-4">
+            <h2 class="text-md font-semibold text-white">📦 部署服务矩阵</h2>
+            <div v-for="s in sys.services" :key="s.id" class="p-4 bg-black/40 rounded-lg border border-gray-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+                <div class="space-y-1">
+                    <div class="flex items-center space-x-2">
+                        <span class="font-bold text-white">{{ s.name }}</span>
+                        <span v-if="s.status === 'running'" class="px-2 py-0.5 text-xs bg-green-900/60 text-green-300 rounded border border-green-700">运行中</span>
+                        <span v-else class="px-2 py-0.5 text-xs bg-yellow-900/60 text-yellow-300 rounded border border-yellow-700">{{ s.statusRaw }}</span>
+                    </div>
+                    <div class="text-xs text-gray-500">容器标识: <code class="text-gray-400">{{ s.id }}</code> | 端口: {{ s.port || '无' }}</div>
+                    <div v-if="s.type === 'app'" class="text-xs text-orange-400">
+                        GitHub Webhook 链接: <span class="bg-gray-800 px-1 py-0.5 rounded select-all font-mono">{{ getWebhookUrl(s.id) }}</span>
+                    </div>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button v-if="s.type === 'app'" @click="triggerAction('build', s.id)" class="bg-orange-600 hover:bg-orange-500 text-white text-xs px-3 py-1.5 rounded transition">🔨 构建并清理</button>
+                    <button v-if="s.status === 'stopped' || s.status === 'uninstalled'" @click="triggerAction('start', s.id)" class="bg-green-700 hover:bg-green-600 text-white text-xs px-3 py-1.5 rounded transition">启动</button>
+                    <button v-if="s.status === 'running'" @click="triggerAction('restart', s.id)" class="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition">重启</button>
+                    <button v-if="s.status === 'running'" @click="triggerAction('stop', s.id)" class="bg-gray-700 hover:bg-gray-600 text-white text-xs px-3 py-1.5 rounded transition">停止</button>
+                    <button @click="showLogs(s.id)" class="bg-gray-800 hover:bg-gray-700 text-white text-xs px-3 py-1.5 rounded border border-gray-600 transition">日志</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 弹窗 -->
+        <div v-if="logModal.show" class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div class="bg-gray-900 max-w-3xl w-full p-6 rounded-xl space-y-3 border border-gray-700">
+                <div class="flex justify-between items-center">
+                    <h3 class="font-bold text-white">{{ logModal.title }}</h3>
+                    <button @click="logModal.show = false" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                <pre class="bg-black p-4 rounded text-xs font-mono text-green-400 max-h-96 overflow-auto whitespace-pre-wrap">{{ logModal.content }}</pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+        createApp({
+            setup() {
+                const sys = ref({ cpu: '', memory: '', disk: '', services: [] });
+                const logModal = ref({ show: false, title: '', content: '' });
+
+                const fetchSystem = async () => {
+                    const res = await fetch('/api/system');
+                    sys.value = await res.json();
+                };
+
+                const getWebhookUrl = (id) => `http://${window.location.hostname}:8888/api/webhook/${id}?token=qorange2026`;
+
+                const triggerAction = async (action, serviceId) => {
+                    logModal.value = { show: true, title: '执行中...', content: '操作已发送至后台，请稍候...' };
+                    try {
+                        const res = await fetch('/api/action', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action, serviceId })
+                        });
+                        const data = await res.json();
+                        logModal.value.content = data.logs || (data.success ? '操作成功！' : JSON.stringify(data));
+                        fetchSystem();
+                    } catch (e) {
+                        logModal.value.content = '执行出错: ' + e;
+                    }
+                };
+
+                const showLogs = async (serviceId) => {
+                    const res = await fetch('/api/action', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'logs', serviceId })
+                    });
+                    const data = await res.json();
+                    logModal.value.content = data.logs || (data.success ? '暂无日志' : JSON.stringify(data));
+                };
+
+                onMounted(() => {
+                    fetchSystem();
+                    setInterval(fetchSystem, 5000);
+                });
+
+                return { sys, logModal, fetchSystem, getWebhookUrl, triggerAction, showLogs };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

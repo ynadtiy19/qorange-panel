@@ -1,0 +1,30 @@
+{
+  "authSecret": "change_me_to_your_strong_secret",
+  "services": [
+    {
+      "id": "mongodb",
+      "name": "MongoDB 8 数据库",
+      "type": "database",
+      "port": "27017",
+      "runCmd": "docker run -d --name mongodb --restart always -p 27017:27017 -v /data/mongo_data:/data/db mongo:8 mongod --wiredTigerCacheSizeGB 0.25"
+    },
+    {
+      "id": "qorange-backend",
+      "name": "QOrange 核心后端 (Dart Frog)",
+      "type": "app",
+      "repo": "https://github.com/ynadtiy19/qorange.git",
+      "branch": "main",
+      "port": "8080",
+      "env": "PORT=8080 MONGO_URI=mongodb://172.17.0.1:27017/googlechat"
+    },
+    {
+      "id": "qorange-landing",
+      "name": "官方落地页 (Landing Page)",
+      "type": "app",
+      "repo": "https://github.com/ynadtiy19/appstorescreenshot.git",
+      "branch": "main",
+      "port": "3000",
+      "env": "PORT=3000"
+    }
+  ]
+}

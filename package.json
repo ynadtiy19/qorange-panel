@@ -1,0 +1,12 @@
+{
+  "name": "qorange-panel",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight self-hosted PaaS dashboard tailored for budget VPS",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
