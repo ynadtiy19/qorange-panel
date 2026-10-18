@@ -38,7 +38,7 @@ require_command() {
 
 [[ "$(uname -s)" == "Linux" ]] || fail "This installer supports Linux VPS hosts with systemd."
 [[ "$(id -u)" -eq 0 ]] || fail "Run this installer with sudo/root privileges."
-for command_name in node npm systemctl curl tar docker gh openssl getent cut runuser; do
+for command_name in node npm systemctl curl tar docker openssl; do
     require_command "$command_name"
 done
 systemctl --version >/dev/null 2>&1 || fail "systemd is required."
@@ -46,24 +46,6 @@ systemctl --version >/dev/null 2>&1 || fail "systemd is required."
 NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
 [[ "$NODE_MAJOR" -ge 18 ]] || fail "Node.js 18 or newer is required."
 docker info >/dev/null 2>&1 || fail "Docker is required and its daemon must already be running. No Docker data was changed."
-
-INSTALLER_USER="${SUDO_USER:-root}"
-USER_HOME="$(getent passwd "$INSTALLER_USER" | cut -d: -f6)"
-[[ -n "$USER_HOME" && -d "$USER_HOME" ]] || fail "Could not determine the home directory for $INSTALLER_USER."
-if [[ -n "${GH_CONFIG_DIR:-}" ]]; then
-    GH_CONFIG_DIR_VALUE="$GH_CONFIG_DIR"
-else
-    GH_CONFIG_DIR_VALUE="$USER_HOME/.config/gh"
-fi
-GH_CLI_PATH_VALUE="$(command -v gh)"
-if [[ "$INSTALLER_USER" != "root" ]]; then
-    runuser -u "$INSTALLER_USER" -- env GH_CONFIG_DIR="$GH_CONFIG_DIR_VALUE" gh auth status >/dev/null 2>&1 ||
-        fail "GitHub CLI is unavailable or '$INSTALLER_USER' is not authenticated. Run 'gh auth login' as that user, then rerun."
-else
-    gh auth status >/dev/null 2>&1 || fail "GitHub CLI is unavailable or root is not authenticated. Run 'gh auth login' as root, then rerun."
-fi
-env HOME="$USER_HOME" GH_CONFIG_DIR="$GH_CONFIG_DIR_VALUE" gh auth status >/dev/null 2>&1 ||
-    fail "The authenticated GitHub CLI configuration cannot be read by the panel service account. Re-authenticate with gh and retry."
 
 if [[ -e "$INSTALL_DIR" && ! -f "$INSTALL_DIR/.qorange-panel-owned" ]]; then
     LEGACY_PANEL=0
@@ -139,12 +121,6 @@ printf 'QOrange Panel managed installation\n' > "$INSTALL_DIR/.qorange-panel-own
 chmod 600 "$INSTALL_DIR/.qorange-panel-owned"
 node "$INSTALL_DIR/scripts/migrate-legacy.js" "$INSTALL_DIR/config.json" "$DATA_DIR/services.json" "$ENV_DIR"
 
-systemd_quote() {
-    local escaped="$1"
-    escaped="${escaped//\\/\\\\}"
-    escaped="${escaped//\"/\\\"}"
-    printf '"%s"' "$escaped"
-}
 NODE_PATH="$(command -v node)"
 PANEL_ENV="$ETC_DIR/panel.env"
 if [[ -L "$PANEL_ENV" ]]; then
@@ -161,23 +137,10 @@ if [[ ! -e "$PANEL_ENV" ]]; then
         printf 'AUTH_FILE=/etc/qorange-panel/auth.json\n'
         printf 'SESSION_KEY_FILE=/etc/qorange-panel/session.key\n'
         printf 'COOKIE_SECURE=0\n'
-        printf 'HOME=%s\n' "$(systemd_quote "$USER_HOME")"
-        printf 'GH_CONFIG_DIR=%s\n' "$(systemd_quote "$GH_CONFIG_DIR_VALUE")"
-        printf 'GH_CLI_PATH=%s\n' "$(systemd_quote "$GH_CLI_PATH_VALUE")"
     } > "$PANEL_ENV_TMP"
     install -m 0600 "$PANEL_ENV_TMP" "$PANEL_ENV"
 else
     [[ -f "$PANEL_ENV" ]] || fail "$PANEL_ENV is not a regular file; refusing to replace it."
-    for env_key in HOME GH_CONFIG_DIR GH_CLI_PATH; do
-        if ! grep -q "^${env_key}=" "$PANEL_ENV"; then
-            case "$env_key" in
-                HOME) env_value="$USER_HOME" ;;
-                GH_CONFIG_DIR) env_value="$GH_CONFIG_DIR_VALUE" ;;
-                GH_CLI_PATH) env_value="$GH_CLI_PATH_VALUE" ;;
-            esac
-            printf '%s=%s\n' "$env_key" "$(systemd_quote "$env_value")" >> "$PANEL_ENV"
-        fi
-    done
     chmod 0600 "$PANEL_ENV"
 fi
 
@@ -247,7 +210,7 @@ if [[ "$CREATED_AUTH" -eq 1 ]]; then
 else
     printf 'Administrator credentials were preserved from the previous installation.\n'
 fi
-printf 'GitHub CLI authentication is inherited from %s; private repositories are supported.\n' "$INSTALLER_USER"
+printf 'GitHub repository access is configured in the panel with OAuth Device Flow; set GITHUB_CLIENT_ID in %s.\n' "$PANEL_ENV"
 printf 'Security: use HTTPS before exposing this panel to the public internet, then set COOKIE_SECURE=1 in %s and restart the service.\n' "$ETC_DIR/panel.env"
 printf 'For temporary secure remote access, use: ssh -L 8888:127.0.0.1:8888 <your-vps>\n'
 printf 'MongoDB and /data/mongo_data were not modified. The installer does not remove /data/apps/*.\n'
