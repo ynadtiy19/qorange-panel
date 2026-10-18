@@ -314,7 +314,7 @@ function isContainerNameConflict(error) {
 async function ownedContainerId(name, id) {
     try {
         const result = await runFile(DOCKER_CLI_PATH, [
-            'inspect', '--format',
+            'container', 'inspect', '--format',
             '{{.Id}}|{{ index .Config.Labels "com.qorange.panel" }}|{{ index .Config.Labels "com.qorange.service" }}',
             name
         ], { timeout: 15000 });
