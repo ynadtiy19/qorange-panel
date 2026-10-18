@@ -13,7 +13,12 @@ const {
     validateServiceId,
     containerName,
     resolveServiceStatus,
-    redactSecrets
+    redactSecrets,
+    detectRepositoryRecipe,
+    allocatePublicPort,
+    buildMongoUri,
+    normalizeMongoEnv,
+    previewDeploymentPlan
 } = require('../lib/core');
 const { createSession, verifySession, verifyPassword } = require('../lib/auth');
 
@@ -145,6 +150,46 @@ test('updater validates the existing installation and retains rollback and user 
     assert.doesNotMatch(source, /create-auth\.js/);
     assert.doesNotMatch(source, /rm\s+-rf\s+\/data\/apps/);
     assert.match(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), /process\.env\.GH_CLI_PATH/);
+});
+
+test('detects a deterministic Dockerfile or Compose recipe without executing guessed commands', () => {
+    const dockerRecipe = detectRepositoryRecipe({ Dockerfile: 'FROM node:20\nEXPOSE 3000\nENV PORT=3000\nCMD [\"node\", \"server.js\"]\n' }, { repo: 'org/app', branch: 'main' });
+    assert.equal(dockerRecipe.supported, true);
+    assert.equal(dockerRecipe.source, 'dockerfile');
+    assert.equal(dockerRecipe.port, 3000);
+    assert.equal(dockerRecipe.envDefaults.PORT, '3000');
+    assert.equal(dockerRecipe.requiresConfirmation, true);
+    assert.match(dockerRecipe.message, /requires review/i);
+
+    const composeRecipe = detectRepositoryRecipe({
+        'compose.yaml': 'services:\n  web:\n    image: nginx:stable\n    ports:\n      - "8080:80"\n'
+    }, { repo: 'org/app', branch: 'main' });
+    assert.equal(composeRecipe.supported, true);
+    assert.equal(composeRecipe.source, 'compose');
+    assert.equal(composeRecipe.port, 80);
+
+    const preview = previewDeploymentPlan(composeRecipe);
+    assert.equal(preview.supported, true);
+    assert.match(preview.review, /review/i);
+    assert.match(preview.publicAddress, /^http:\/\//);
+
+    const unsafe = detectRepositoryRecipe({
+        'compose.yaml': 'services:\n  web:\n    image: busybox\n    command: "sh -c \"echo hi\""\n    network_mode: host\n'
+    }, { repo: 'org/app', branch: 'main' });
+    assert.equal(unsafe.supported, false);
+    assert.match(unsafe.reason, /unsupported|unsafe/i);
+});
+
+test('allocates a public host port while preserving explicit overrides and MongoDB private wiring', () => {
+    assert.equal(allocatePublicPort(8080, [8080, 8081]), 8082);
+    assert.equal(allocatePublicPort(5000, []), 5000);
+
+    const uri = buildMongoUri({ host: 'mongodb', port: 27017, dbName: 'googlechat', username: 'root', password: 's3cret' });
+    assert.equal(uri, 'mongodb://root:s3cret@mongodb:27017/googlechat');
+
+    const env = normalizeMongoEnv({ DB_NAME: 'googlechat', MONGO_HOST: 'mongodb', MONGO_PORT: '27017' });
+    assert.equal(env.MONGODB_URI, 'mongodb://mongodb:27017/googlechat');
+    assert.equal(env.MONGODB_URI.includes('172.17.0.1'), false);
 });
 
 test('panel HTML declares Simplified Chinese and translated interface labels', () => {

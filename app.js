@@ -12,9 +12,12 @@ const {
     parseEnv,
     validateService,
     validateServiceId,
+    validateBranch,
     containerName,
     resolveServiceStatus,
-    redactSecrets
+    redactSecrets,
+    detectRepositoryRecipe,
+    previewDeploymentPlan
 } = require('./lib/core');
 const {
     createSession,
@@ -246,6 +249,34 @@ async function githubInfo() {
     return { user: JSON.parse(userResult.stdout), repos: JSON.parse(repoResult.stdout) };
 }
 
+async function inspectBranchRecipe(repo, branch) {
+    if (typeof repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+        throw new Error('请从已登录的 GitHub 账户中选择一个仓库');
+    }
+    const safeBranch = validateBranch(branch || 'main');
+    const treeResult = await runFile(GH_CLI_PATH, ['api', `repos/${repo}/git/trees/${safeBranch}?recursive=1`], { timeout: 30000 });
+    const tree = JSON.parse(treeResult.stdout);
+    const paths = Array.isArray(tree.tree) ? tree.tree.map(item => item.path).filter(Boolean) : [];
+    const candidates = paths.filter(path => {
+        const name = path.split('/').pop().toLowerCase();
+        return ['dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'package.json', 'requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'go.mod'].includes(name);
+    });
+    const fileMap = {};
+    for (const candidate of candidates) {
+        const endpoint = `repos/${repo}/contents/${candidate}?ref=${safeBranch}`;
+        const details = JSON.parse((await runFile(GH_CLI_PATH, ['api', endpoint], { timeout: 30000 })).stdout);
+        const content = details && details.content ? Buffer.from(details.content, 'base64').toString('utf8') : '';
+        fileMap[candidate] = content;
+    }
+    const recipe = detectRepositoryRecipe(fileMap, { repo, branch: safeBranch });
+    if (!recipe.supported) {
+        const error = new Error(recipe.reason || '未找到受支持的部署方案');
+        error.statusCode = 422;
+        throw error;
+    }
+    return { recipe, preview: previewDeploymentPlan(recipe) };
+}
+
 async function assertOwnedContainer(name, id) {
     try {
         const result = await runFile(DOCKER_CLI_PATH, [
@@ -391,6 +422,17 @@ app.get('/api/github/info', async (_req, res) => {
         res.json(await githubInfo());
     } catch (error) {
         sendOperationError(res, new Error(`GitHub CLI 不可用或尚未登录：${safeError(error)}`));
+    }
+});
+
+app.post('/api/repos/preview', async (req, res) => {
+    try {
+        const repo = typeof req.body && typeof req.body.repo === 'string' ? req.body.repo.trim() : '';
+        const branch = typeof req.body && typeof req.body.branch === 'string' ? req.body.branch.trim() : 'main';
+        const preview = await inspectBranchRecipe(repo, branch);
+        res.json(preview);
+    } catch (error) {
+        sendOperationError(res, error);
     }
 });
 
