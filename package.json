@@ -4,7 +4,9 @@
   "description": "Ultra-lightweight self-hosted PaaS dashboard tailored for budget VPS",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "test": "node --test",
+    "check": "node --check app.js && node --check lib/core.js && node --check lib/auth.js && node --check public/app.js && node --check scripts/create-auth.js && node --check scripts/migrate-legacy.js"
   },
   "dependencies": {
     "express": "^4.19.2"
