@@ -7,7 +7,16 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
-const { downloadGithubArchive } = require('./lib/github');
+const {
+    downloadGithubArchiveForAccount,
+    startDeviceAuthorization,
+    pollDeviceAuthorization,
+    githubCurrentUser,
+    githubRepositories,
+    githubBranches,
+    githubRepositoryFiles,
+    requireClientId
+} = require('./lib/github');
 const { collectSystemMetrics, sampleCpuUsage } = require('./lib/system');
 const {
     parseEnv,
@@ -40,16 +49,20 @@ const SESSION_KEY_FILE = process.env.SESSION_KEY_FILE || path.join(DATA_DIR, 'se
 const SERVICE_FILE = path.join(DATA_DIR, 'services.json');
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const MAX_ENV_BYTES = 64 * 1024;
-const GH_CLI_PATH = process.env.GH_CLI_PATH || 'gh';
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
+const GITHUB_ACCOUNT_FILE = path.join(DATA_DIR, 'github-accounts.json');
 const DOCKER_CLI_PATH = process.env.DOCKER_CLI_PATH || 'docker';
 const loginAttempts = new Map();
 const serviceOperations = new Map();
 let previousCpuSnapshot = null;
+const githubDeviceFlows = new Map();
+let githubHttpFetch = (...args) => globalThis.fetch(...args);
+const githubFetchOptions = () => ({ fetchImpl: githubHttpFetch });
 
 function runFile(file, args, options = {}) {
     return execFileAsync(file, args, {
         cwd: options.cwd,
-        env: { ...process.env, GH_PROMPT_DISABLED: '1' },
+        env: process.env,
         encoding: 'utf8',
         maxBuffer: 20 * 1024 * 1024,
         timeout: options.timeout || 10 * 60 * 1000,
@@ -78,6 +91,56 @@ function writeServices(services) {
     fs.writeFileSync(temp, JSON.stringify({ services }, null, 2), { mode: 0o600 });
     fs.renameSync(temp, SERVICE_FILE);
     fs.chmodSync(SERVICE_FILE, 0o600);
+}
+
+function readGithubAccounts() {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.chmodSync(DATA_DIR, 0o700);
+    try {
+        const stat = fs.lstatSync(GITHUB_ACCOUNT_FILE);
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('GitHub credential file is not a regular file');
+        fs.chmodSync(GITHUB_ACCOUNT_FILE, 0o600);
+        const store = JSON.parse(fs.readFileSync(GITHUB_ACCOUNT_FILE, 'utf8'));
+        if (!store || !Array.isArray(store.accounts)) throw new Error('GitHub credential file is invalid');
+        return store.accounts;
+    } catch (error) {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+    }
+}
+
+function writeGithubAccounts(accounts) {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    fs.chmodSync(DATA_DIR, 0o700);
+    const temp = `${GITHUB_ACCOUNT_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify({ accounts }, null, 2), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temp, GITHUB_ACCOUNT_FILE);
+    fs.chmodSync(GITHUB_ACCOUNT_FILE, 0o600);
+}
+
+function githubAccountFor(id) {
+    if (id === undefined || id === null || id === '') return null;
+    if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) {
+        const error = new Error('GitHub account selection is invalid.');
+        error.statusCode = 400;
+        throw error;
+    }
+    const account = readGithubAccounts().find(item => item.id === id);
+    if (!account) {
+        const error = new Error('The selected GitHub account is no longer linked. Select another account and update the service.');
+        error.statusCode = 409;
+        throw error;
+    }
+    if (typeof account.token !== 'string' || !account.token) {
+        const error = new Error('The selected GitHub account is disconnected. Reconnect it or choose another account.');
+        error.statusCode = 409;
+        throw error;
+    }
+    return account;
+}
+
+function publicGithubAccount(account) {
+    return { id: account.id, login: account.login, name: account.name || '', linkedAt: account.linkedAt };
 }
 
 function envFilePath(id) {
@@ -226,34 +289,9 @@ function limitOutput(text, maxLength = 120_000) {
     return `[较早的输出已截断]\n${text.slice(-maxLength)}`;
 }
 
-async function githubInfo() {
-    await runFile(GH_CLI_PATH, ['auth', 'status'], { timeout: 15000 });
-    const [userResult, repoResult] = await Promise.all([
-        runFile(GH_CLI_PATH, ['api', 'user', '--jq', '{login: .login, avatar_url: .avatar_url, name: .name}'], { timeout: 30000 }),
-        runFile(GH_CLI_PATH, ['repo', 'list', '--limit', '1000', '--json', 'name,nameWithOwner,url,isPrivate,defaultBranchRef'], { timeout: 60000 })
-    ]);
-    return { user: JSON.parse(userResult.stdout), repos: JSON.parse(repoResult.stdout) };
-}
-
-async function inspectBranchRecipe(repo, branch) {
-    if (typeof repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-        throw new Error('请从已登录的 GitHub 账户中选择一个仓库');
-    }
+async function inspectBranchRecipe(repo, branch, token) {
     const safeBranch = validateBranch(branch || 'main');
-    const treeResult = await runFile(GH_CLI_PATH, ['api', `repos/${repo}/git/trees/${safeBranch}?recursive=1`], { timeout: 30000 });
-    const tree = JSON.parse(treeResult.stdout);
-    const paths = Array.isArray(tree.tree) ? tree.tree.map(item => item.path).filter(Boolean) : [];
-    const candidates = paths.filter(path => {
-        const name = path.split('/').pop().toLowerCase();
-        return ['dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'package.json', 'requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'go.mod'].includes(name);
-    });
-    const fileMap = {};
-    for (const candidate of candidates) {
-        const endpoint = `repos/${repo}/contents/${candidate}?ref=${safeBranch}`;
-        const details = JSON.parse((await runFile(GH_CLI_PATH, ['api', endpoint], { timeout: 30000 })).stdout);
-        const content = details && details.content ? Buffer.from(details.content, 'base64').toString('utf8') : '';
-        fileMap[candidate] = content;
-    }
+    const fileMap = await githubRepositoryFiles(repo, safeBranch, token, githubFetchOptions());
     const recipe = detectRepositoryRecipe(fileMap, { repo, branch: safeBranch });
     if (!recipe.supported) {
         const error = new Error(recipe.reason || '未找到受支持的部署方案');
@@ -323,14 +361,9 @@ async function performDeploy(service) {
     const logs = [`开始部署 ${service.name}。`];
     try {
         fs.mkdirSync(source);
-        try {
-            await runFile(GH_CLI_PATH, ['auth', 'status'], { timeout: 15000 });
-        } catch (error) {
-            throw new Error(`GitHub CLI 不可用或尚未登录：${safeError(error, secrets)}`);
-        }
-        const endpoint = `repos/${service.repo}/tarball/${service.branch}`;
+        const account = githubAccountFor(service.githubAccountId);
         logs.push('正在下载所选 GitHub 分支。');
-        await downloadGithubArchive(GH_CLI_PATH, endpoint, archive, { secrets });
+        await downloadGithubArchiveForAccount(service.repo, service.branch, account && account.token, archive, githubFetchOptions());
         await runFile('tar', ['-xzf', archive, '-C', source, '--strip-components=1'], { timeout: 5 * 60 * 1000 });
         logs.push('正在构建应用镜像。');
         const build = await runFile(DOCKER_CLI_PATH, [
@@ -374,11 +407,11 @@ function updateDeploymentState(id, status) {
 
 app.disable('x-powered-by');
 app.use(setSecurityHeaders);
-app.use(express.json({ limit: MAX_ENV_BYTES + 32 * 1024, type: 'application/json' }));
 app.use((req, res, next) => {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     next();
 });
+app.use(express.json({ limit: MAX_ENV_BYTES + 32 * 1024, type: 'application/json' }));
 app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
 
 app.get('/healthz', (_req, res) => res.status(200).type('text/plain').send('ok'));
@@ -415,19 +448,124 @@ app.post('/api/logout', (_req, res) => {
     res.json({ success: true });
 });
 
-app.get('/api/github/info', async (_req, res) => {
+app.get('/api/github/accounts', (_req, res) => {
     try {
-        res.json(await githubInfo());
+        res.json({
+            clientConfigured: /^[A-Za-z0-9_]{20}$/.test(GITHUB_CLIENT_ID),
+            accounts: readGithubAccounts().filter(account => account.token).map(publicGithubAccount)
+        });
     } catch (error) {
-        sendOperationError(res, new Error(`GitHub CLI 不可用或尚未登录：${safeError(error)}`));
+        sendOperationError(res, error);
+    }
+});
+
+app.post('/api/github/device', async (req, res) => {
+    try {
+        requireClientId(GITHUB_CLIENT_ID);
+        const authorization = await startDeviceAuthorization(GITHUB_CLIENT_ID, githubFetchOptions());
+        for (const [id, flow] of githubDeviceFlows) {
+            if (flow.expiresAt <= Date.now()) githubDeviceFlows.delete(id);
+        }
+        const id = crypto.randomUUID();
+        githubDeviceFlows.set(id, {
+            deviceCode: authorization.deviceCode,
+            interval: authorization.interval,
+            nextPollAt: Date.now() + authorization.interval * 1000,
+            expiresAt: Date.now() + authorization.expiresIn * 1000,
+            csrf: req.panelSession.csrf
+        });
+        res.json({
+            deviceId: id,
+            userCode: authorization.userCode,
+            verificationUri: authorization.verificationUri,
+            interval: authorization.interval,
+            expiresIn: authorization.expiresIn
+        });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.post('/api/github/device/:id/poll', async (req, res) => {
+    const flow = githubDeviceFlows.get(req.params.id);
+    if (!flow || flow.csrf !== req.panelSession.csrf) return res.status(404).json({ error: 'Device authorization has expired or was not found.' });
+    if (Date.now() >= flow.expiresAt) {
+        githubDeviceFlows.delete(req.params.id);
+        return res.json({ status: 'expired' });
+    }
+    if (Date.now() < flow.nextPollAt) {
+        return res.json({ status: 'pending', interval: flow.interval, retryAfter: Math.ceil((flow.nextPollAt - Date.now()) / 1000) });
+    }
+    try {
+        const result = await pollDeviceAuthorization(GITHUB_CLIENT_ID, flow.deviceCode, githubFetchOptions());
+        if (result.status === 'slow_down') flow.interval += 5;
+        flow.nextPollAt = Date.now() + flow.interval * 1000;
+        if (result.status === 'authorized') {
+            const identity = await githubCurrentUser(result.accessToken, githubFetchOptions());
+            const accounts = readGithubAccounts();
+            const existing = accounts.find(account => account.login.toLowerCase() === identity.login.toLowerCase());
+            const account = {
+                id: existing ? existing.id : crypto.randomUUID(),
+                login: identity.login,
+                name: identity.name,
+                token: result.accessToken,
+                linkedAt: existing ? existing.linkedAt : new Date().toISOString()
+            };
+            writeGithubAccounts(existing
+                ? accounts.map(item => item.id === existing.id ? account : item)
+                : [...accounts, account]);
+            githubDeviceFlows.delete(req.params.id);
+            return res.json({ status: 'authorized', account: publicGithubAccount(account) });
+        }
+        if (['expired', 'denied'].includes(result.status)) githubDeviceFlows.delete(req.params.id);
+        return res.json({ status: result.status, interval: flow.interval });
+    } catch (error) {
+        githubDeviceFlows.delete(req.params.id);
+        sendOperationError(res, error);
+    }
+});
+
+app.delete('/api/github/accounts/:id', (req, res) => {
+    try {
+        const account = readGithubAccounts().find(item => item.id === req.params.id && item.token);
+        if (!account) return res.status(404).json({ error: 'GitHub account not found.' });
+        writeGithubAccounts(readGithubAccounts().map(item => {
+            if (item.id !== account.id) return item;
+            return { id: item.id, login: item.login, name: item.name || '', linkedAt: item.linkedAt };
+        }));
+        res.json({ success: true });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.get('/api/github/accounts/:id/repositories', async (req, res) => {
+    try {
+        const account = githubAccountFor(req.params.id);
+        const repos = await githubRepositories(account.token, githubFetchOptions());
+        res.json({ repos });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.get('/api/github/branches', async (req, res) => {
+    try {
+        const repo = typeof req.query.repo === 'string' ? req.query.repo : '';
+        const account = githubAccountFor(req.query.accountId);
+        const branches = await githubBranches(repo, account && account.token, githubFetchOptions());
+        res.json({ branches });
+    } catch (error) {
+        sendOperationError(res, error);
     }
 });
 
 app.post('/api/repos/preview', async (req, res) => {
     try {
-        const repo = typeof req.body && typeof req.body.repo === 'string' ? req.body.repo.trim() : '';
-        const branch = typeof req.body && typeof req.body.branch === 'string' ? req.body.branch.trim() : 'main';
-        const preview = await inspectBranchRecipe(repo, branch);
+        const repo = typeof req.body.repo === 'string' ? req.body.repo.trim() : '';
+        const branch = typeof req.body.branch === 'string' ? req.body.branch.trim() : 'main';
+        const account = githubAccountFor(req.body.accountId);
+        const preview = await inspectBranchRecipe(repo, branch, account && account.token);
         res.json(preview);
     } catch (error) {
         sendOperationError(res, error);
@@ -467,6 +605,7 @@ app.get('/api/system', async (_req, res) => {
             }
         }
         const registeredServices = readServices();
+        const githubAccounts = new Map(readGithubAccounts().filter(account => account.token).map(account => [account.id, account.login]));
         let registryChanged = false;
         const services = registeredServices.map(service => {
             let deployment = service.deployment && typeof service.deployment === 'object'
@@ -492,6 +631,8 @@ app.get('/api/system', async (_req, res) => {
                 name: service.name,
                 repo: service.repo,
                 branch: service.branch,
+                githubAccountId: service.githubAccountId || null,
+                githubAccountLogin: service.githubAccountId ? githubAccounts.get(service.githubAccountId) || null : null,
                 port: service.port,
                 type: 'app',
                 status: dockerAvailable
@@ -550,6 +691,11 @@ app.post('/api/services', async (req, res) => {
         }
         if (fs.existsSync(envFilePath(service.id))) return res.status(409).json({ error: '该服务 ID 对应的环境变量文件已存在，未覆盖任何数据。' });
         if (input.env !== undefined && typeof input.env !== 'string') return res.status(400).json({ error: '环境变量必须是文本' });
+        const githubAccount = githubAccountFor(service.githubAccountId);
+        const availableBranches = await githubBranches(service.repo, githubAccount && githubAccount.token, githubFetchOptions());
+        if (!availableBranches.includes(service.branch)) {
+            return res.status(400).json({ error: 'The selected branch is not available in the chosen repository.' });
+        }
         writeServiceEnv(service.id, input.env || '');
         try {
             services.push(service);
@@ -771,4 +917,9 @@ if (require.main === module) {
     });
 }
 
-module.exports = { app };
+module.exports = {
+    app,
+    setGithubFetchForTests(fetchImpl) {
+        githubHttpFetch = fetchImpl;
+    }
+};

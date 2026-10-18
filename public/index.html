@@ -29,7 +29,7 @@
                     <p class="muted">服务器运行状态一览</p>
                 </div>
                 <div class="header-actions">
-                    <span id="github-user" class="badge" hidden></span>
+                    <button id="github-accounts-button" class="button subtle" type="button">GitHub 账号</button>
                     <button id="refresh" class="button subtle">刷新</button>
                     <button id="logout" class="button subtle">退出登录</button>
                 </div>
@@ -129,12 +129,22 @@
                 <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
             </div>
             <div id="service-fields" class="form-grid">
-                <label class="wide">GitHub repository
+                <label class="wide">用于仓库访问的 GitHub 账号
+                    <select id="import-account"><option value="">未连接账号（仅公开仓库）</option></select>
+                </label>
+                <label id="repo-select-label" class="wide">GitHub repository
                     <select id="repo" required><option value="">正在加载仓库…</option></select>
+                </label>
+                <label id="public-repo-label" class="wide" hidden>公开仓库（owner/repository）
+                    <input id="public-repo" autocomplete="off" placeholder="例如 octocat/Hello-World">
                 </label>
                 <label>服务名称<input id="name" maxlength="120" required></label>
                 <label>服务 ID<input id="id" pattern="[a-z0-9][a-z0-9_-]{0,62}" required></label>
-                <label>分支<input id="branch" maxlength="255" required value="main"></label>
+                <label>搜索分支<input id="branch-search" autocomplete="off" placeholder="输入以筛选分支"></label>
+                <label>分支
+                    <select id="branch" required disabled><option value="">先选择仓库</option></select>
+                </label>
+                <p id="branch-status" class="muted wide" role="status"></p>
                 <label>主机端口（可选）<input id="port" inputmode="numeric" placeholder="8080 或 8080:3000"></label>
             </div>
             <label class="env-label" for="env-text">环境变量 <span class="muted">每行一个 KEY=VALUE</span></label>
@@ -147,6 +157,25 @@
                 <button id="save-service" type="submit" class="button primary">保存服务</button>
             </div>
         </form>
+    </dialog>
+
+    <dialog id="github-dialog" class="modal">
+        <div class="modal-heading">
+            <div><h2>GitHub 账号</h2><p class="muted">账号访问令牌仅保存在面板服务器上，不会发送到浏览器。</p></div>
+            <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+        </div>
+        <div id="github-account-list" class="environment-variables"></div>
+        <p id="github-account-empty" class="empty-state">尚未连接 GitHub 账号；公开仓库仍可通过 owner/repository 导入。</p>
+        <section id="github-device-panel" class="device-panel" hidden>
+            <p>在 GitHub 打开 <a id="github-verification-link" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">设备验证页面</a>，并输入此代码：</p>
+            <strong id="github-user-code" class="device-code"></strong>
+            <p id="github-device-status" class="muted" role="status"></p>
+        </section>
+        <p id="github-config-notice" class="error" role="alert" hidden>尚未配置 GitHub OAuth Client ID。请管理员在服务器环境中设置 GITHUB_CLIENT_ID 后重启面板。</p>
+        <div class="modal-actions">
+            <button id="connect-github" type="button" class="button primary">连接 GitHub 账号</button>
+            <button type="button" class="button subtle" data-close>关闭</button>
+        </div>
     </dialog>
 
     <dialog id="logs-dialog" class="modal log-modal">

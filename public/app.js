@@ -13,6 +13,11 @@ let editServiceId = null;
 let environmentService = null;
 let editVariableKey = null;
 let repositories = [];
+let githubAccounts = [];
+let githubClientConfigured = false;
+let availableBranches = [];
+let branchRequestId = 0;
+let devicePollTimer = null;
 
 async function request(url, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -99,6 +104,8 @@ function renderEnvRows() {
 
 function resetServiceDialog() {
     editServiceId = null;
+    branchRequestId += 1;
+    availableBranches = [];
     $('#service-form').reset();
     $('#env-text').value = '';
     $('#env-rows').replaceChildren();
@@ -106,27 +113,184 @@ function resetServiceDialog() {
     $('#env-error').textContent = '';
     $('#service-fields').hidden = false;
     $('#repo').required = true;
+    $('#import-account').value = '';
+    $('#public-repo').value = '';
+    $('#branch-search').value = '';
+    $('#branch-search').disabled = true;
+    $('#branch').replaceChildren(new Option('先选择仓库', ''));
+    $('#branch').disabled = true;
+    $('#branch-status').textContent = '';
+    $('#repo').replaceChildren(new Option('先选择 GitHub 账号', ''));
+    $('#repo-select-label').hidden = false;
+    $('#public-repo-label').hidden = true;
     $('#env-hint').textContent = '变量将保存在服务器的私有文件中，保存后不会再次显示。';
     $('#service-dialog-title').textContent = '导入仓库';
-    $('#service-dialog-description').textContent = '选择一个 GitHub 仓库，系统会自动检测其默认分支。';
+    $('#service-dialog-description').textContent = '选择访问账号和仓库，再从 GitHub 获取并选择实际部署的分支。';
     $('#save-service').textContent = '保存服务';
+}
+
+function renderGithubAccounts() {
+    const list = $('#github-account-list');
+    list.replaceChildren();
+    $('#github-account-empty').hidden = githubAccounts.length > 0;
+    for (const account of githubAccounts) {
+        const row = document.createElement('div');
+        row.className = 'environment-row';
+        const identity = document.createElement('strong');
+        identity.textContent = `${account.login}${account.name ? ` · ${account.name}` : ''}`;
+        const disconnect = document.createElement('button');
+        disconnect.type = 'button';
+        disconnect.className = 'button danger';
+        disconnect.textContent = '断开连接';
+        disconnect.addEventListener('click', async () => {
+            if (!window.confirm(`断开 ${account.login}？已保存的服务将保留该账号关联，但需要重新选择账号才能部署。`)) return;
+            disconnect.disabled = true;
+            try {
+                await request(`/api/github/accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' });
+                await loadGithubAccounts();
+                showNotice(`已断开 GitHub 账号 ${account.login}。`);
+            } catch (error) {
+                showNotice(error.message, true);
+            } finally {
+                disconnect.disabled = false;
+            }
+        });
+        row.append(identity, disconnect);
+        list.append(row);
+    }
+    const selector = $('#import-account');
+    const prior = selector.value;
+    selector.replaceChildren(new Option('未连接账号（仅公开仓库）', ''));
+    for (const account of githubAccounts) selector.add(new Option(account.login, account.id));
+    selector.value = githubAccounts.some(account => account.id === prior) ? prior : '';
+}
+
+async function loadGithubAccounts() {
+    try {
+        const data = await request('/api/github/accounts');
+        githubAccounts = data.accounts || [];
+        githubClientConfigured = data.clientConfigured;
+        $('#connect-github').disabled = !githubClientConfigured;
+        $('#github-config-notice').hidden = githubClientConfigured;
+        renderGithubAccounts();
+    } catch (error) {
+        showNotice(error.message, true);
+    }
 }
 
 async function loadRepositories() {
     const select = $('#repo');
+    const accountId = $('#import-account').value;
+    branchRequestId += 1;
+    availableBranches = [];
+    $('#branch').replaceChildren(new Option('先选择仓库', ''));
+    $('#branch').disabled = true;
+    $('#branch-search').disabled = true;
+    $('#branch-status').textContent = '';
+    if (!accountId) {
+        repositories = [];
+        $('#repo').required = false;
+        $('#repo-select-label').hidden = true;
+        $('#public-repo-label').hidden = false;
+        $('#public-repo').required = true;
+        return;
+    }
+    $('#repo').required = true;
+    $('#repo-select-label').hidden = false;
+    $('#public-repo-label').hidden = true;
+    $('#public-repo').required = false;
+    select.disabled = true;
+    repositories = [];
     select.replaceChildren(new Option('正在加载仓库…', ''));
     try {
-        const data = await request('/api/github/info');
+        const data = await request(`/api/github/accounts/${encodeURIComponent(accountId)}/repositories`);
         repositories = data.repos || [];
-        $('#github-user').textContent = `GitHub：${data.user.login}`;
-        $('#github-user').hidden = false;
         select.replaceChildren(new Option('请选择仓库', ''));
         repositories.forEach((repo, index) => {
             select.add(new Option(`${repo.isPrivate ? '🔒' : '🌐'} ${repo.nameWithOwner}`, String(index)));
         });
+        select.disabled = false;
+        if (!repositories.length) $('#branch-status').textContent = '该账号未找到可访问的仓库。';
     } catch (error) {
         select.replaceChildren(new Option('无法加载仓库', ''));
-        showNotice(`GitHub CLI：${error.message}。请在服务器上安装 gh 并运行 gh auth login。`, true);
+        $('#branch-status').textContent = error.message;
+        showNotice(error.message, true);
+    }
+}
+
+async function loadBranches(repo, defaultBranch = '') {
+    const requestId = ++branchRequestId;
+    const accountId = $('#import-account').value;
+    const branch = $('#branch');
+    branch.disabled = true;
+    branch.replaceChildren(new Option('正在加载分支…', ''));
+    $('#branch-search').disabled = true;
+    availableBranches = [];
+    $('#branch-status').textContent = '正在从 GitHub 加载分支…';
+    $('#branch-search').value = '';
+    try {
+        const params = new URLSearchParams({ repo });
+        if (accountId) params.set('accountId', accountId);
+        const data = await request(`/api/github/branches?${params}`);
+        if (requestId !== branchRequestId) return;
+        availableBranches = data.branches || [];
+        renderBranchOptions();
+        $('#branch-search').disabled = false;
+        if (!availableBranches.length) {
+            $('#branch-status').textContent = '此仓库没有可用分支。';
+            return;
+        }
+        branch.disabled = false;
+        branch.value = availableBranches.includes(defaultBranch) ? defaultBranch : availableBranches[0];
+        $('#branch-status').textContent = `${availableBranches.length} 个分支可供选择。`;
+    } catch (error) {
+        if (requestId !== branchRequestId) return;
+        availableBranches = [];
+        branch.replaceChildren(new Option('无法加载分支', ''));
+        $('#branch-search').disabled = false;
+        $('#branch-status').textContent = `加载分支失败：${error.message}`;
+    }
+}
+
+function renderBranchOptions() {
+    const branch = $('#branch');
+    const selected = branch.value;
+    const query = $('#branch-search').value.trim().toLowerCase();
+    const matches = availableBranches.filter(name => name.toLowerCase().includes(query));
+    branch.replaceChildren(new Option(matches.length ? '选择分支' : '没有匹配的分支', ''));
+    matches.forEach(name => branch.add(new Option(name, name)));
+    if (matches.includes(selected)) branch.value = selected;
+    else if (matches.length === 1) branch.value = matches[0];
+    branch.disabled = availableBranches.length === 0 || matches.length === 0;
+}
+
+async function pollGithubDevice(deviceId, interval) {
+    try {
+        const result = await request(`/api/github/device/${encodeURIComponent(deviceId)}/poll`, {
+            method: 'POST',
+            body: '{}'
+        });
+        if (result.status === 'authorized') {
+            $('#github-device-status').textContent = `已连接 ${result.account.login}。`;
+            $('#github-user-code').textContent = '';
+            await loadGithubAccounts();
+            $('#connect-github').disabled = !githubClientConfigured;
+            return;
+        }
+        if (result.status === 'expired' || result.status === 'denied') {
+            $('#github-device-status').textContent = result.status === 'denied'
+                ? 'GitHub 账号授权已拒绝。'
+                : '授权代码已过期，请重新连接。';
+            $('#github-user-code').textContent = '';
+            $('#connect-github').disabled = !githubClientConfigured;
+            return;
+        }
+        const wait = Math.max(interval, result.interval || interval, result.retryAfter || 0);
+        $('#github-device-status').textContent = `等待 GitHub 确认；${wait} 秒后检查。`;
+        devicePollTimer = setTimeout(() => pollGithubDevice(deviceId, wait), wait * 1000);
+    } catch (error) {
+        $('#github-device-status').textContent = error.message;
+        $('#connect-github').disabled = !githubClientConfigured;
     }
 }
 
@@ -273,7 +437,10 @@ function renderServices(services) {
         }
         const meta = document.createElement('div');
         meta.className = 'service-meta';
-        meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · 端口 ${service.port}` : ''}${service.containerPorts ? ` · Docker ${service.containerPorts}` : ''}`;
+        const accountLabel = service.githubAccountId
+            ? service.githubAccountLogin || 'GitHub 账号已断开'
+            : '公开仓库';
+        meta.textContent = `${service.id} · ${service.repo} · ${service.branch} · ${accountLabel}${service.port ? ` · 端口 ${service.port}` : ''}${service.containerPorts ? ` · Docker ${service.containerPorts}` : ''}`;
         const envMeta = document.createElement('div');
         envMeta.className = 'service-meta';
         envMeta.textContent = service.environmentConfigured
@@ -533,16 +700,50 @@ $('#logout').addEventListener('click', async () => {
 $('#add-service').addEventListener('click', async () => {
     resetServiceDialog();
     serviceDialog.showModal();
+    await loadGithubAccounts();
     await loadRepositories();
 });
 
-$('#repo').addEventListener('change', () => {
+$('#import-account').addEventListener('change', loadRepositories);
+
+async function repositorySelected(repo, defaultBranch = '') {
+    if (!repo) return;
+    const repoName = typeof repo === 'string' ? repo : repo.nameWithOwner;
+    const name = typeof repo === 'string' ? repoName.split('/').pop() : repo.name;
+    $('#name').value = name;
+    $('#id').value = name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+/, '').slice(0, 63);
+    await loadBranches(repoName, defaultBranch);
+}
+
+$('#repo').addEventListener('change', async () => {
+    if (!$('#repo').value) {
+        branchRequestId += 1;
+        availableBranches = [];
+        $('#branch').replaceChildren(new Option('先选择仓库', ''));
+        $('#branch').disabled = true;
+        $('#branch-status').textContent = '';
+        return;
+    }
     const repo = repositories[Number($('#repo').value)];
     if (!repo) return;
-    $('#name').value = repo.name;
-    $('#id').value = repo.name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+/, '').slice(0, 63);
-    $('#branch').value = repo.defaultBranchRef && repo.defaultBranchRef.name || 'main';
+    await repositorySelected(repo, repo.defaultBranch);
 });
+
+$('#public-repo').addEventListener('change', () => {
+    const repo = $('#public-repo').value.trim();
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+        branchRequestId += 1;
+        availableBranches = [];
+        $('#branch-status').textContent = '请按 owner/repository 格式输入公开仓库。';
+        $('#branch').replaceChildren(new Option('仓库名称无效', ''));
+        $('#branch').disabled = true;
+        $('#branch-search').disabled = true;
+        return;
+    }
+    repositorySelected(repo);
+});
+
+$('#branch-search').addEventListener('input', renderBranchOptions);
 
 $('#env-text').addEventListener('input', renderEnvRows);
 
@@ -562,17 +763,51 @@ $('#service-form').addEventListener('submit', async event => {
             showNotice('环境变量已替换；如需应用到运行中的服务，请重新构建并部署。');
         } else {
             const repo = repositories[Number($('#repo').value)];
-            if (!repo) throw new Error('请选择一个 GitHub 仓库。');
+            const accountId = $('#import-account').value || null;
+            const repoName = accountId ? repo && repo.nameWithOwner : $('#public-repo').value.trim();
+            if (!repoName) throw new Error('请选择或输入一个 GitHub 仓库。');
+            if (!$('#branch').value) throw new Error('请选择 GitHub 返回的一个有效分支。');
             await request('/api/services', {
                 method: 'POST',
                 body: JSON.stringify({
                     id: $('#id').value,
                     name: $('#name').value,
-                    repo: repo.nameWithOwner,
+                    repo: repoName,
                     branch: $('#branch').value,
+                    githubAccountId: accountId,
                     port: $('#port').value,
                     env
                 })
+            });
+
+            $('#github-accounts-button').addEventListener('click', async () => {
+                $('#github-device-panel').hidden = true;
+                $('#github-device-status').textContent = '';
+                await loadGithubAccounts();
+                $('#github-dialog').showModal();
+            });
+
+            $('#connect-github').addEventListener('click', async () => {
+                const button = $('#connect-github');
+                button.disabled = true;
+                $('#github-device-status').textContent = '正在向 GitHub 请求设备代码…';
+                try {
+                    const authorization = await request('/api/github/device', { method: 'POST', body: '{}' });
+                    const link = $('#github-verification-link');
+                    link.href = authorization.verificationUri;
+                    $('#github-user-code').textContent = authorization.userCode;
+                    $('#github-device-panel').hidden = false;
+                    $('#github-device-status').textContent = `代码有效约 ${Math.ceil(authorization.expiresIn / 60)} 分钟。`;
+                    if (devicePollTimer) clearTimeout(devicePollTimer);
+                    devicePollTimer = setTimeout(
+                        () => pollGithubDevice(authorization.deviceId, authorization.interval),
+                        authorization.interval * 1000
+                    );
+                } catch (error) {
+                    $('#github-device-status').textContent = error.message;
+                } finally {
+                    if ($('#github-device-panel').hidden) button.disabled = !githubClientConfigured;
+                }
             });
             showNotice('服务已保存。准备就绪后即可构建并部署。');
         }
@@ -628,6 +863,13 @@ document.querySelectorAll('[data-close]').forEach(button => button.addEventListe
     dialog.close();
 }));
 serviceDialog.addEventListener('close', resetServiceDialog);
+$('#github-dialog').addEventListener('close', () => {
+    if (devicePollTimer) clearTimeout(devicePollTimer);
+    devicePollTimer = null;
+    $('#github-device-panel').hidden = true;
+    $('#github-user-code').textContent = '';
+    $('#connect-github').disabled = !githubClientConfigured;
+});
 environmentDialog.addEventListener('close', clearEnvironmentDialog);
 variableDialog.addEventListener('close', () => {
     $('#variable-value').value = '';
@@ -640,7 +882,7 @@ async function showDashboard() {
     dashboard.hidden = false;
     selectView('server');
     showNotice('');
-    await loadSystem();
+    await Promise.all([loadSystem(), loadGithubAccounts()]);
 }
 
 async function start() {
