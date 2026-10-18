@@ -10,14 +10,20 @@ app.use(express.static(path.join(__dirname, 'public')));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const EXAMPLE_PATH = path.join(__dirname, 'config.example.json');
 
-// 如果本地没有 config.json，自动从 example 复制一份
 if (!fs.existsSync(CONFIG_PATH)) {
-    fs.copyFileSync(EXAMPLE_PATH, CONFIG_PATH);
-    console.log('[Init] 已根据 config.example.json 初始化 config.json');
+    if (fs.existsSync(EXAMPLE_PATH)) {
+        fs.copyFileSync(EXAMPLE_PATH, CONFIG_PATH);
+    } else {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ authSecret: "qorange2026", services: [] }, null, 2));
+    }
 }
 
 function getConfig() {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+}
+
+function saveConfig(cfg) {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 
 function runCommand(cmd) {
@@ -29,7 +35,62 @@ function runCommand(cmd) {
     });
 }
 
-// 1. 获取系统监控与服务状态
+// 1. 获取 GitHub 用户状态与名下所有仓库 (私密+公开)
+app.get('/api/github/info', async (req, res) => {
+    try {
+        const userStr = await runCommand("gh api user --jq '{login: .login, avatar_url: .avatar_url, name: .name}'");
+        const reposStr = await runCommand("gh repo list --limit 100 --json name,nameWithOwner,url,isPrivate,defaultBranchRef");
+        res.json({
+            user: JSON.parse(userStr.trim()),
+            repos: JSON.parse(reposStr.trim())
+        });
+    } catch (e) {
+        res.status(500).json({ error: "未检测到 GitHub 登录态，请在服务器运行 gh auth login" });
+    }
+});
+
+// 2. 动态添加新服务
+app.post('/api/services/add', async (req, res) => {
+    const { id, name, repo, branch, port, env } = req.body;
+    if (!id || !repo) return res.status(400).json({ error: "缺少必要字段" });
+
+    const cfg = getConfig();
+    if (cfg.services.some(s => s.id === id)) {
+        return res.status(400).json({ error: "该服务标识已存在" });
+    }
+
+    const newService = {
+        id: id.trim(),
+        name: name.trim() || id.trim(),
+        type: "app",
+        repo: repo.trim(),
+        branch: branch.trim() || "main",
+        port: port ? port.toString().trim() : "",
+        env: env ? env.trim() : ""
+    };
+
+    cfg.services.push(newService);
+    saveConfig(cfg);
+
+    res.json({ success: true, service: newService });
+});
+
+// 3. 删除服务
+app.post('/api/services/delete', async (req, res) => {
+    const { serviceId } = req.body;
+    const cfg = getConfig();
+    cfg.services = cfg.services.filter(s => s.id !== serviceId);
+    saveConfig(cfg);
+
+    try {
+        await runCommand(`docker stop ${serviceId} || true`);
+        await runCommand(`docker rm ${serviceId} || true`);
+    } catch (e) {}
+
+    res.json({ success: true });
+});
+
+// 4. 系统状态
 app.get('/api/system', async (req, res) => {
     try {
         const memOut = await runCommand("free -m | awk 'NR==2{printf \"%s/%sMB (%.1f%%)\", $3,$2,$3*100/$2 }'");
@@ -46,7 +107,7 @@ app.get('/api/system', async (req, res) => {
         });
 
         const cfg = getConfig();
-        const services = cfg.services.map(s => ({
+        const services = (cfg.services || []).map(s => ({
             ...s,
             status: containerMap[s.id] ? (containerMap[s.id].includes('Up') ? 'running' : 'stopped') : 'uninstalled',
             statusRaw: containerMap[s.id] || '未部署'
@@ -58,7 +119,7 @@ app.get('/api/system', async (req, res) => {
     }
 });
 
-// 2. 本地构建与自动清理流程
+// 5. 核心构建流程 (拉取 -> 构建 -> 重启 -> 清理旧镜像)
 async function buildAndDeploy(service) {
     const dir = `/data/apps/${service.id}`;
     let logs = `[${new Date().toLocaleTimeString()}] 开始构建部署: ${service.name}\n`;
@@ -88,14 +149,14 @@ async function buildAndDeploy(service) {
     return logs;
 }
 
-// 3. GitHub Webhook 触发入口
+// 6. Webhook
 app.post('/api/webhook/:serviceId', async (req, res) => {
     const { serviceId } = req.params;
     const token = req.query.token;
     const cfg = getConfig();
 
     if (token !== cfg.authSecret) return res.status(403).send('Forbidden');
-    const service = cfg.services.find(s => s.id === serviceId);
+    const service = (cfg.services || []).find(s => s.id === serviceId);
     if (!service) return res.status(404).send('Not Found');
 
     res.send({ status: 'Triggered' });
@@ -106,15 +167,15 @@ app.post('/api/webhook/:serviceId', async (req, res) => {
     }
 });
 
-// 4. 容器与服务管理指令
+// 7. 操作接口
 app.post('/api/action', async (req, res) => {
     const { action, serviceId } = req.body;
     const cfg = getConfig();
-    const service = cfg.services.find(s => s.id === serviceId);
+    const service = (cfg.services || []).find(s => s.id === serviceId);
 
     try {
         if (action === 'start') {
-            if (service.type === 'database') await runCommand(service.runCmd);
+            if (service && service.type === 'database') await runCommand(service.runCmd);
             else await runCommand(`docker start ${serviceId}`);
             return res.json({ success: true });
         }
@@ -138,12 +199,10 @@ app.post('/api/action', async (req, res) => {
             const cleanOut = await runCommand(`docker system prune -af`);
             return res.json({ logs: cleanOut });
         }
-        // 核心亮点：控制台自我升级机制
         if (action === 'selfUpdate') {
             const updateLogs = await runCommand('git fetch --all && git reset --hard origin/main && npm install');
-            // 后台平滑延时 1 秒自杀重启，保证当前的成功响应先返回给浏览器
             exec("nohup sh -c 'sleep 1 && systemctl restart qorange-panel' > /dev/null 2>&1 &");
-            return res.json({ success: true, logs: updateLogs + '\n✓ 代码已同步，控制台正在平滑重启，2秒后刷新页面生效！' });
+            return res.json({ success: true, logs: updateLogs + '\n✓ 控制台正在平滑重启，2秒后刷新页面生效！' });
         }
     } catch (e) {
         res.status(500).json({ error: e.toString() });

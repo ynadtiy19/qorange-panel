@@ -10,26 +10,35 @@
 </head>
 <body class="p-6">
     <div id="app" class="max-w-5xl mx-auto space-y-6">
-        <!-- 顶部导航 -->
+        <!-- 头部导航 -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-gray-700 pb-4 gap-4">
             <div>
-                <h1 class="text-2xl font-bold text-orange-400">🍊 QOrange 独立控制台</h1>
-                <p class="text-xs text-gray-400 mt-1">专为低配小内存 VPS 设计的私有化微型 PaaS</p>
+                <div class="flex items-center space-x-3">
+                    <h1 class="text-2xl font-bold text-orange-400">🍊 QOrange 独立控制台</h1>
+                    <span v-if="ghUser.login" class="flex items-center space-x-1.5 px-2.5 py-1 text-xs bg-gray-800 text-green-400 border border-green-800/60 rounded-full">
+                        <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                        <span>GitHub: {{ ghUser.login }}</span>
+                    </span>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">专为低配小内存 VPS 设计的私有微型 PaaS</p>
             </div>
             <div class="flex flex-wrap gap-2">
+                <button @click="openAddModal" class="bg-green-700 hover:bg-green-600 text-white text-xs px-3 py-1.5 rounded transition">
+                    + 从 GitHub 导入服务
+                </button>
                 <button @click="triggerAction('selfUpdate', '')" class="bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 text-xs px-3 py-1.5 rounded border border-indigo-700 transition">
-                    🚀 升级控制台本身
+                    🚀 升级控制台
                 </button>
                 <button @click="triggerAction('cleanDisk', '')" class="bg-red-900/60 hover:bg-red-800 text-red-200 text-xs px-3 py-1.5 rounded border border-red-700 transition">
-                    🧹 深度清理 Docker
+                    🧹 深度清理
                 </button>
                 <button @click="fetchSystem" class="bg-gray-800 hover:bg-gray-700 text-xs px-3 py-1.5 rounded border border-gray-600 transition">
-                    🔄 刷新状态
+                    🔄 刷新
                 </button>
             </div>
         </header>
 
-        <!-- 系统资源卡片 -->
+        <!-- 系统状态卡片 -->
         <section class="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div class="bg-gray-900 p-4 rounded-xl border border-gray-800">
                 <div class="text-xs text-gray-500 font-medium">CPU 占用率</div>
@@ -40,12 +49,12 @@
                 <div class="text-xl font-bold text-green-400 mt-1">{{ sys.memory || '...' }}</div>
             </div>
             <div class="bg-gray-900 p-4 rounded-xl border border-gray-800">
-                <div class="text-xs text-gray-500 font-medium">系统磁盘占比</div>
+                <div class="text-xs text-gray-500 font-medium">20G 磁盘使用</div>
                 <div class="text-xl font-bold text-yellow-400 mt-1">{{ sys.disk || '...' }}</div>
             </div>
         </section>
 
-        <!-- 服务矩阵列表 -->
+        <!-- 部署服务列表 -->
         <section class="bg-gray-900 rounded-xl p-6 border border-gray-800 space-y-4">
             <h2 class="text-md font-semibold text-white">📦 部署服务矩阵</h2>
             <div v-for="s in sys.services" :key="s.id" class="p-4 bg-black/40 rounded-lg border border-gray-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
@@ -55,9 +64,9 @@
                         <span v-if="s.status === 'running'" class="px-2 py-0.5 text-xs bg-green-900/60 text-green-300 rounded border border-green-700">运行中</span>
                         <span v-else class="px-2 py-0.5 text-xs bg-yellow-900/60 text-yellow-300 rounded border border-yellow-700">{{ s.statusRaw }}</span>
                     </div>
-                    <div class="text-xs text-gray-500">容器标识: <code class="text-gray-400">{{ s.id }}</code> | 端口: {{ s.port || '无' }}</div>
+                    <div class="text-xs text-gray-500 font-mono">容器ID: {{ s.id }} | 端口: {{ s.port || '无' }}</div>
                     <div v-if="s.type === 'app'" class="text-xs text-orange-400">
-                        GitHub Webhook 链接: <span class="bg-gray-800 px-1 py-0.5 rounded select-all font-mono">{{ getWebhookUrl(s.id) }}</span>
+                        Webhook 自动构建: <span class="bg-gray-800 px-1 py-0.5 rounded select-all font-mono">{{ getWebhookUrl(s.id) }}</span>
                     </div>
                 </div>
                 <div class="flex flex-wrap gap-2">
@@ -66,11 +75,65 @@
                     <button v-if="s.status === 'running'" @click="triggerAction('restart', s.id)" class="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition">重启</button>
                     <button v-if="s.status === 'running'" @click="triggerAction('stop', s.id)" class="bg-gray-700 hover:bg-gray-600 text-white text-xs px-3 py-1.5 rounded transition">停止</button>
                     <button @click="showLogs(s.id)" class="bg-gray-800 hover:bg-gray-700 text-white text-xs px-3 py-1.5 rounded border border-gray-600 transition">日志</button>
+                    <button v-if="s.id !== 'mongodb'" @click="deleteService(s.id)" class="text-red-400 hover:text-red-300 text-xs px-2 py-1.5 rounded transition">✕</button>
                 </div>
             </div>
         </section>
 
-        <!-- 弹窗 -->
+        <!-- 添加服务弹窗 (从 GitHub 选库) -->
+        <div v-if="addModal.show" class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div class="bg-gray-900 max-w-lg w-full p-6 rounded-xl space-y-4 border border-gray-700">
+                <div class="flex justify-between items-center">
+                    <h3 class="font-bold text-white text-lg">🐙 从 GitHub 导入新服务</h3>
+                    <button @click="addModal.show = false" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                
+                <div class="space-y-3">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">选择 GitHub 仓库 (支持所有公开/私密库)</label>
+                        <select v-model="addModal.selectedRepo" @change="onRepoSelect" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white">
+                            <option value="">-- 请选择仓库 --</option>
+                            <option v-for="r in ghRepos" :key="r.nameWithOwner" :value="r">
+                                {{ r.isPrivate ? '🔒' : '🌐' }} {{ r.nameWithOwner }}
+                            </option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">服务展示名称</label>
+                        <input v-model="addModal.form.name" type="text" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white" placeholder="比如: QOrange 官方落地页">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">容器标识符 (英文小写)</label>
+                        <input v-model="addModal.form.id" type="text" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white" placeholder="比如: qorange-landing">
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-xs text-gray-400 mb-1">Git 分支</label>
+                            <input v-model="addModal.form.branch" type="text" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white" placeholder="main">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-400 mb-1">映射端口</label>
+                            <input v-model="addModal.form.port" type="text" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white" placeholder="8080">
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">环境变量 (空格分隔)</label>
+                        <input v-model="addModal.form.env" type="text" class="w-full bg-black border border-gray-700 rounded p-2 text-sm text-white" placeholder="PORT=8080 NODE_ENV=production">
+                    </div>
+                </div>
+
+                <div class="flex justify-end space-x-2 pt-2">
+                    <button @click="addModal.show = false" class="bg-gray-800 text-gray-300 text-xs px-4 py-2 rounded">取消</button>
+                    <button @click="submitAddService" class="bg-green-700 hover:bg-green-600 text-white text-xs px-4 py-2 rounded">确认创建并保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 日志弹窗 -->
         <div v-if="logModal.show" class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
             <div class="bg-gray-900 max-w-3xl w-full p-6 rounded-xl space-y-3 border border-gray-700">
                 <div class="flex justify-between items-center">
@@ -87,11 +150,70 @@
         createApp({
             setup() {
                 const sys = ref({ cpu: '', memory: '', disk: '', services: [] });
+                const ghUser = ref({});
+                const ghRepos = ref([]);
                 const logModal = ref({ show: false, title: '', content: '' });
+
+                const addModal = ref({
+                    show: false,
+                    selectedRepo: null,
+                    form: { id: '', name: '', repo: '', branch: 'main', port: '', env: '' }
+                });
 
                 const fetchSystem = async () => {
                     const res = await fetch('/api/system');
                     sys.value = await res.json();
+                };
+
+                const fetchGitHub = async () => {
+                    try {
+                        const res = await fetch('/api/github/info');
+                        const data = await res.json();
+                        ghUser.value = data.user || {};
+                        ghRepos.value = data.repos || [];
+                    } catch (e) {
+                        console.error('获取 GitHub 仓库列表失败', e);
+                    }
+                };
+
+                const openAddModal = () => {
+                    addModal.value.show = true;
+                    if (ghRepos.value.length === 0) fetchGitHub();
+                };
+
+                const onRepoSelect = () => {
+                    const r = addModal.value.selectedRepo;
+                    if (r) {
+                        addModal.value.form.name = r.name;
+                        addModal.value.form.id = r.name.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+                        addModal.value.form.repo = r.url + '.git';
+                        addModal.value.form.branch = (r.defaultBranchRef && r.defaultBranchRef.name) || 'main';
+                    }
+                };
+
+                const submitAddService = async () => {
+                    const res = await fetch('/api/services/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(addModal.value.form)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        addModal.value.show = false;
+                        fetchSystem();
+                    } else {
+                        alert(data.error || '添加失败');
+                    }
+                };
+
+                const deleteService = async (serviceId) => {
+                    if (!confirm(`确定要移除 ${serviceId} 吗？这会停止并清理其容器。`)) return;
+                    await fetch('/api/services/delete', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ serviceId })
+                    });
+                    fetchSystem();
                 };
 
                 const getWebhookUrl = (id) => `http://${window.location.hostname}:8888/api/webhook/${id}?token=qorange2026`;
@@ -124,10 +246,15 @@
 
                 onMounted(() => {
                     fetchSystem();
+                    fetchGitHub();
                     setInterval(fetchSystem, 5000);
                 });
 
-                return { sys, logModal, fetchSystem, getWebhookUrl, triggerAction, showLogs };
+                return {
+                    sys, ghUser, ghRepos, addModal, logModal,
+                    fetchSystem, getWebhookUrl, triggerAction, showLogs,
+                    openAddModal, onRepoSelect, submitAddService, deleteService
+                };
             }
         }).mount('#app');
     </script>
