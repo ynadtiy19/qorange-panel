@@ -218,26 +218,12 @@ function renderManagedContainers(containers, dockerStatus) {
     }
 }
 
-const viewLabels = {
-    server: '服务器信息',
-    projects: '项目',
-    ssh: 'SSH',
-    monitoring: '监控',
-    status: '状态',
-    upgrade: '升级',
-    firewall: '防火墙',
-    collaborators: '协作者',
-    settings: '设置'
-};
-
 function selectView(view) {
-    const supported = view === 'server' || view === 'projects';
-    $('#server-view').hidden = view !== 'server';
-    $('#projects-view').hidden = view !== 'projects';
-    $('#placeholder-view').hidden = supported;
-    if (!supported) $('#placeholder-title').textContent = `${viewLabels[view] || '此功能'} · 暂未支持`;
+    const selectedView = view === 'projects' ? 'projects' : 'server';
+    $('#server-view').hidden = selectedView !== 'server';
+    $('#projects-view').hidden = selectedView !== 'projects';
     document.querySelectorAll('.nav-tab').forEach(tab => {
-        const selected = tab.dataset.view === view;
+        const selected = tab.dataset.view === selectedView;
         tab.classList.toggle('active', selected);
         tab.setAttribute('aria-selected', String(selected));
     });
@@ -637,7 +623,6 @@ $('#variable-form').addEventListener('submit', async event => {
 
 $('#refresh').addEventListener('click', loadSystem);
 document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click', () => selectView(tab.dataset.view)));
-$('#return-server').addEventListener('click', () => selectView('server'));
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => {
     const dialog = button.closest('dialog');
     dialog.close();
@@ -653,6 +638,7 @@ variableDialog.addEventListener('close', () => {
 async function showDashboard() {
     loginView.hidden = true;
     dashboard.hidden = false;
+    selectView('server');
     showNotice('');
     await loadSystem();
 }

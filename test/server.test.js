@@ -29,6 +29,9 @@ process.env.COOKIE_SECURE = '0';
 fs.mkdirSync(process.env.WORKSPACE_DIR, { recursive: true });
 const dockerStub = path.join(root, 'docker-stub.js');
 fs.writeFileSync(dockerStub, `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (process.env.FAKE_DOCKER_LOG) fs.appendFileSync(process.env.FAKE_DOCKER_LOG, JSON.stringify(args) + '\\n');
 if (process.argv[2] === 'ps') {
     if (process.env.FAKE_DOCKER_FAIL === '1') {
         process.stderr.write('daemon unavailable');
@@ -37,7 +40,20 @@ if (process.argv[2] === 'ps') {
     process.stdout.write(process.env.FAKE_DOCKER_PS || '');
 }
 if (process.argv[2] === 'version') process.stdout.write('27.0.3\\n');
-if (process.argv[2] === 'inspect') process.stdout.write('true|website\\n');
+if (process.argv[2] === 'inspect') {
+    if (process.env.FAKE_DOCKER_INSPECT === 'missing') {
+        process.stderr.write('Error response from daemon: No such container: ' + process.argv[5]);
+        process.exit(1);
+    }
+    const owner = process.env.FAKE_DOCKER_INSPECT === 'unowned' ? 'legacy' : process.env.FAKE_DOCKER_OWNER || 'website';
+    process.stdout.write('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|true|' + owner + '\\n');
+}
+if (['stop', 'rm'].includes(process.argv[2])) {
+    if (process.env['FAKE_DOCKER_' + process.argv[2].toUpperCase() + '_MISSING'] === '1') {
+        process.stderr.write('Error response from daemon: No such container: ' + process.argv[3]);
+        process.exit(1);
+    }
+}
 if (process.argv[2] === 'run') process.stdout.write('fake-container-id\\n');
 `);
 fs.chmodSync(dockerStub, 0o700);
@@ -459,9 +475,89 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     });
     assert.equal(csrfFailure.status, 403);
 
+    const deploymentRegistryPath = path.join(dataDir, 'services.json');
+    const registerForDeleteTest = id => {
+        const config = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8'));
+        config.services.push({
+            id,
+            name: id,
+            repo: 'org/site',
+            branch: 'main',
+            port: '',
+            deployment: { status: 'failed', lastAttemptAt: '2026-10-18T10:00:00.000Z', lastSuccessAt: null }
+        });
+        fs.writeFileSync(deploymentRegistryPath, JSON.stringify(config));
+        fs.writeFileSync(path.join(envDir, `${id}.env`), `TOKEN=${id}-secret\n`, { mode: 0o600 });
+    };
+    const deleteService = id => fetch(`${baseUrl}/api/services/${id}/action`, {
+        method: 'POST',
+        headers: {
+            Cookie: cookie,
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': loginBody.csrfToken
+        },
+        body: JSON.stringify({ action: 'delete' })
+    });
+    const dockerLog = path.join(root, 'docker-operations.jsonl');
+    process.env.FAKE_DOCKER_LOG = dockerLog;
+    process.env.FAKE_DOCKER_OWNER = 'orphaned';
+    process.env.FAKE_DOCKER_INSPECT = 'missing';
+    registerForDeleteTest('orphaned');
+    const missingContainerDelete = await deleteService('orphaned');
+    const missingContainerDeleteText = await missingContainerDelete.text();
+    assert.equal(missingContainerDelete.status, 200, missingContainerDeleteText);
+    let deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'orphaned'), false);
+    assert.equal(fs.existsSync(path.join(envDir, 'orphaned.env')), false);
+    let dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+
+    fs.writeFileSync(dockerLog, '');
+    process.env.FAKE_DOCKER_OWNER = 'vanishing';
+    process.env.FAKE_DOCKER_INSPECT = '';
+    process.env.FAKE_DOCKER_STOP_MISSING = '1';
+    process.env.FAKE_DOCKER_RM_MISSING = '1';
+    registerForDeleteTest('vanishing');
+    const vanishedContainerDelete = await deleteService('vanishing');
+    const vanishedContainerDeleteText = await vanishedContainerDelete.text();
+    assert.equal(vanishedContainerDelete.status, 200, vanishedContainerDeleteText);
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'vanishing'), false);
+    assert.equal(fs.existsSync(path.join(envDir, 'vanishing.env')), false);
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect', 'stop', 'rm']);
+    assert.ok(dockerOperations.slice(1).every(args => args[1] === 'a'.repeat(64)));
+    delete process.env.FAKE_DOCKER_STOP_MISSING;
+    delete process.env.FAKE_DOCKER_RM_MISSING;
+
+    fs.writeFileSync(dockerLog, '');
+    process.env.FAKE_DOCKER_OWNER = 'protected';
+    process.env.FAKE_DOCKER_INSPECT = 'unowned';
+    registerForDeleteTest('protected');
+    const mongoData = path.join(root, 'mongo-data');
+    fs.mkdirSync(mongoData);
+    fs.writeFileSync(path.join(mongoData, 'sentinel'), 'preserve existing database data');
+    const protectedContainerDelete = await deleteService('protected');
+    const protectedContainerDeleteText = await protectedContainerDelete.text();
+    assert.equal(protectedContainerDelete.status, 409, protectedContainerDeleteText);
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'protected'), true);
+    assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), true);
+    assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+
     const staticPage = await fetch(`${baseUrl}/`);
     assert.equal(staticPage.status, 200);
     assert.match(staticPage.headers.get('content-security-policy'), /frame-ancestors 'none'/);
-    assert.equal((await staticPage.text()).includes(secret), false);
+    const staticContent = await staticPage.text();
+    assert.equal(staticContent.includes(secret), false);
+    assert.deepEqual([...staticContent.matchAll(/data-view="([^"]+)"/g)].map(match => match[1]), ['server', 'projects']);
+    assert.match(staticContent, /id="server-view"/);
+    assert.match(staticContent, /id="projects-view"/);
+    assert.doesNotMatch(staticContent, /placeholder-view|data-view="(?:ssh|monitoring|status|upgrade|firewall|collaborators|settings)"/);
+    const clientScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+    assert.match(clientScript, /const selectedView = view === 'projects' \? 'projects' : 'server'/);
 
 });

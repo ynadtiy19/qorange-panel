@@ -263,23 +263,38 @@ async function inspectBranchRecipe(repo, branch) {
     return { recipe, preview: previewDeploymentPlan(recipe) };
 }
 
-async function assertOwnedContainer(name, id) {
+function isContainerNotFound(error) {
+    return /No such (?:object|container)(?::|\b)/i.test(error.stderr || error.message || '');
+}
+
+async function ownedContainerId(name, id) {
     try {
         const result = await runFile(DOCKER_CLI_PATH, [
             'inspect', '--format',
-            '{{ index .Config.Labels "com.qorange.panel" }}|{{ index .Config.Labels "com.qorange.service" }}',
+            '{{.Id}}|{{ index .Config.Labels "com.qorange.panel" }}|{{ index .Config.Labels "com.qorange.service" }}',
             name
         ], { timeout: 15000 });
-        if (result.stdout.trim() !== `true|${id}`) {
+        const [containerId, panelLabel, serviceLabel] = result.stdout.trim().split('|');
+        if (!/^[a-f0-9]{64}$/i.test(containerId || '') || panelLabel !== 'true' || serviceLabel !== id) {
             const error = new Error('同名容器并非由 QOrange 管理，已保持原样且未作更改');
             error.statusCode = 409;
             throw error;
         }
-        return true;
+        return containerId;
     } catch (error) {
         if (error.statusCode) throw error;
-        if (/No such object|No such container|Error: No such object/i.test(error.stderr || error.message)) return false;
+        if (isContainerNotFound(error)) return null;
         throw error;
+    }
+}
+
+async function removeOwnedContainer(containerId) {
+    for (const action of ['stop', 'rm']) {
+        try {
+            await runFile(DOCKER_CLI_PATH, [action, containerId], { timeout: 60000 });
+        } catch (error) {
+            if (!isContainerNotFound(error)) throw error;
+        }
     }
 }
 
@@ -327,11 +342,8 @@ async function performDeploy(service) {
         if (build.stdout) logs.push(build.stdout);
         if (build.stderr) logs.push(build.stderr);
 
-        const exists = await assertOwnedContainer(name, service.id);
-        if (exists) {
-            await runFile(DOCKER_CLI_PATH, ['stop', name], { timeout: 60000 });
-            await runFile(DOCKER_CLI_PATH, ['rm', name], { timeout: 60000 });
-        }
+        const existingContainerId = await ownedContainerId(name, service.id);
+        if (existingContainerId) await removeOwnedContainer(existingContainerId);
         const args = ['run', '-d', '--name', name, '--restart', 'unless-stopped',
             '--label', 'com.qorange.panel=true',
             '--label', `com.qorange.service=${service.id}`];
@@ -700,7 +712,7 @@ app.post('/api/services/:id/action', async (req, res) => {
             return res.status(400).json({ error: '不支持此操作' });
         }
         await withServiceLock(id, async () => {
-            secrets = readServiceEnv(id);
+            secrets = action === 'delete' ? readServiceEnvIfPresent(id) : readServiceEnv(id);
             const name = containerName(id);
             if (action === 'build') {
                 updateDeploymentState(id, 'deploying');
@@ -719,28 +731,25 @@ app.post('/api/services/:id/action', async (req, res) => {
                 return;
             }
             if (action === 'delete') {
-                const exists = await assertOwnedContainer(name, id);
-                if (exists) {
-                    await runFile(DOCKER_CLI_PATH, ['stop', name], { timeout: 60000 });
-                    await runFile(DOCKER_CLI_PATH, ['rm', name], { timeout: 60000 });
-                }
+                const containerId = await ownedContainerId(name, id);
+                if (containerId) await removeOwnedContainer(containerId);
                 try { fs.unlinkSync(envFilePath(id)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
                 const services = readServices().filter(item => item.id !== id);
                 writeServices(services);
                 res.json({ success: true });
                 return;
             }
-            const exists = await assertOwnedContainer(name, id);
-            if (!exists) {
+            const containerId = await ownedContainerId(name, id);
+            if (!containerId) {
                 res.status(404).json({ error: '该服务尚未部署容器' });
                 return;
             }
             if (action === 'logs') {
-                const result = await runFile(DOCKER_CLI_PATH, ['logs', '--tail', '200', name], { timeout: 30000 });
+                const result = await runFile(DOCKER_CLI_PATH, ['logs', '--tail', '200', containerId], { timeout: 30000 });
                 res.json({ logs: limitOutput(redactSecrets(`${result.stdout}${result.stderr}`, serviceSecrets(secrets))) });
                 return;
             }
-            const result = await runFile(DOCKER_CLI_PATH, [action, name], { timeout: 60000 });
+            const result = await runFile(DOCKER_CLI_PATH, [action, containerId], { timeout: 60000 });
             res.json({ success: true, logs: limitOutput(redactSecrets(`${result.stdout}${result.stderr}`, serviceSecrets(secrets))) });
         });
     } catch (error) {

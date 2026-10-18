@@ -38,18 +38,11 @@
             <div id="notice" class="notice" role="status" hidden></div>
 
             <nav class="main-nav" aria-label="控制面板导航" role="tablist">
-                <button class="nav-tab active" type="button" role="tab" aria-selected="true" data-view="server">服务器信息</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="projects">项目</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="ssh">SSH</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="monitoring">监控</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="status">状态</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="upgrade">升级</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="firewall">防火墙</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="collaborators">协作者</button>
-                <button class="nav-tab" type="button" role="tab" aria-selected="false" data-view="settings">设置</button>
+                <button id="server-tab" class="nav-tab active" type="button" role="tab" aria-selected="true" aria-controls="server-view" data-view="server">服务器信息</button>
+                <button id="projects-tab" class="nav-tab" type="button" role="tab" aria-selected="false" aria-controls="projects-view" data-view="projects">项目</button>
             </nav>
 
-            <section id="server-view" class="dashboard-view" role="tabpanel">
+            <section id="server-view" class="dashboard-view" role="tabpanel" aria-labelledby="server-tab">
                 <section class="server-hero panel-card">
                     <div class="hero-copy">
                         <span class="eyebrow">当前服务器</span>
@@ -117,7 +110,7 @@
                 </section>
             </section>
 
-            <section id="projects-view" class="dashboard-view panel-card services-panel" role="tabpanel" hidden>
+            <section id="projects-view" class="dashboard-view panel-card services-panel" role="tabpanel" aria-labelledby="projects-tab" hidden>
                 <div class="section-heading">
                     <div><h2>项目</h2><p class="muted">已保存的应用服务会在刷新后保留。环境变量仅显示名称和掩码，不会返回原值。</p></div>
                     <button id="add-service" class="button primary">+ 导入 GitHub 仓库</button>
@@ -126,12 +119,6 @@
                 <p id="empty-services" class="empty-state">还没有服务。导入仓库即可开始。</p>
             </section>
 
-            <section id="placeholder-view" class="dashboard-view panel-card placeholder-panel" role="tabpanel" hidden>
-                <span class="placeholder-icon">◌</span>
-                <h2 id="placeholder-title">功能暂未支持</h2>
-                <p class="muted">当前版本不会模拟或推测此功能的状态。此面板仅提供已验证的服务器信息和项目管理。</p>
-                <button id="return-server" class="button subtle" type="button">返回服务器信息</button>
-            </section>
         </section>
     </main>
 
