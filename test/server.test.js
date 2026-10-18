@@ -144,8 +144,17 @@ let deviceFlowNumber = 0;
 const fakeGithubFetch = async (url, options = {}) => {
     const parsed = new URL(url);
     const authorization = options.headers && options.headers.Authorization;
-    githubApiCalls.push({ url: parsed.href, authorization, method: options.method || 'GET' });
+    githubApiCalls.push({
+        url: parsed.href,
+        authorization,
+        method: options.method || 'GET',
+        contentType: options.headers && options.headers['Content-Type'],
+        body: options.body
+    });
     if (parsed.pathname.endsWith('/login/oauth/device/code')) {
+        if (process.env.FAKE_OAUTH_DEVICE_FAILURE === 'non-json') {
+            return new Response('client_secret=private-secret device_code=private-device-code', { status: 502 });
+        }
         deviceFlowNumber += 1;
         return new Response(JSON.stringify({
             device_code: `private-device-code-${deviceFlowNumber}`,
@@ -362,6 +371,20 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     });
     assert.equal(missingCsrfDevice.status, 403);
 
+    process.env.FAKE_OAUTH_DEVICE_FAILURE = 'non-json';
+    const failedDeviceResponse = await fetch(`${baseUrl}/api/github/device`, {
+        method: 'POST',
+        headers: csrfHeaders,
+        body: '{}'
+    });
+    const failedDeviceText = await failedDeviceResponse.text();
+    assert.equal(failedDeviceResponse.status, 502);
+    assert.match(failedDeviceText, /non-JSON OAuth response \(HTTP 502\)/);
+    assert.match(failedDeviceText, /Device Flow.*GITHUB_CLIENT_ID/);
+    assert.equal(failedDeviceText.includes('private-secret'), false);
+    assert.equal(failedDeviceText.includes('private-device-code'), false);
+    delete process.env.FAKE_OAUTH_DEVICE_FAILURE;
+
     process.env.FAKE_OAUTH_TOKEN = 'alice-oauth-token-for-tests';
     const deviceResponse = await fetch(`${baseUrl}/api/github/device`, {
         method: 'POST',
@@ -374,6 +397,12 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const device = JSON.parse(deviceResponseText);
     assert.equal(device.userCode, 'DEVICE-1');
     assert.equal(device.verificationUri, 'https://github.com/login/device');
+    const deviceRequest = githubApiCalls.findLast(call => call.url.endsWith('/login/oauth/device/code'));
+    assert.equal(deviceRequest.contentType, 'application/x-www-form-urlencoded');
+    assert.deepEqual(Object.fromEntries(new URLSearchParams(deviceRequest.body)), {
+        client_id: process.env.GITHUB_CLIENT_ID,
+        scope: 'repo'
+    });
     assert.equal(deviceResponseText.includes('private-device-code'), false);
     assert.equal(deviceResponseText.includes('alice-oauth-token-for-tests'), false);
     const oauthCallsBeforePoll = githubApiCalls.filter(call => call.url.endsWith('/login/oauth/access_token')).length;
