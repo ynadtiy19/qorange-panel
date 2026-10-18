@@ -27,7 +27,13 @@ test('starts device flow with repo scope and validates the verification destinat
     let sent;
     const authorization = await startDeviceAuthorization(clientId, {
         fetchImpl: async (url, options) => {
-            sent = { url, body: JSON.parse(options.body), method: options.method };
+            sent = {
+                url,
+                body: Object.fromEntries(new URLSearchParams(options.body)),
+                method: options.method,
+                contentType: options.headers['Content-Type'],
+                accept: options.headers.Accept
+            };
             return new Response(JSON.stringify({
                 device_code: 'device-code-private',
                 user_code: 'ABCD-EFGH',
@@ -39,6 +45,8 @@ test('starts device flow with repo scope and validates the verification destinat
     });
     assert.equal(sent.url, 'https://github.com/login/oauth/device/code');
     assert.equal(sent.method, 'POST');
+    assert.equal(sent.contentType, 'application/x-www-form-urlencoded');
+    assert.equal(sent.accept, 'application/json');
     assert.deepEqual(sent.body, { client_id: clientId, scope: 'repo' });
     assert.deepEqual(authorization, {
         deviceCode: 'device-code-private',
@@ -69,7 +77,8 @@ test('maps device polling pending, slowdown, expired, denied, and authorized out
     ];
     let index = 0;
     const fetchImpl = async (_url, options) => {
-        const body = JSON.parse(options.body);
+        assert.equal(options.headers['Content-Type'], 'application/x-www-form-urlencoded');
+        const body = Object.fromEntries(new URLSearchParams(options.body));
         assert.equal(body.client_id, clientId);
         assert.equal(body.device_code, 'device-code');
         assert.equal(body.grant_type, 'urn:ietf:params:oauth:grant-type:device_code');
@@ -83,6 +92,46 @@ test('maps device polling pending, slowdown, expired, denied, and authorized out
         status: 'authorized',
         accessToken: 'gho_private_access_token_1234567890'
     });
+});
+
+test('reports safe actionable OAuth errors for non-JSON and rejected responses', async () => {
+    const privateResponseText = 'device_code=private-device-code client_secret=private-secret access_token=private-token';
+    const cases = [
+        {
+            response: new Response(privateResponseText, { status: 502 }),
+            expected: /non-JSON OAuth response \(HTTP 502\).*Device Flow.*GITHUB_CLIENT_ID/
+        },
+        {
+            response: new Response(JSON.stringify({
+                error: 'device_flow_disabled',
+                error_description: privateResponseText
+            }), { status: 200 }),
+            expected: /Enable Device Flow.*GITHUB_CLIENT_ID/
+        },
+        {
+            response: new Response(JSON.stringify({
+                error: 'incorrect_client_credentials',
+                error_description: privateResponseText
+            }), { status: 401 }),
+            expected: /rejected the OAuth Client ID \(HTTP 401\).*GITHUB_CLIENT_ID/
+        },
+        {
+            response: new Response(JSON.stringify({ message: privateResponseText }), { status: 503 }),
+            expected: /GitHub OAuth request failed \(HTTP 503\).*Device Flow/
+        }
+    ];
+    for (const { response, expected } of cases) {
+        await assert.rejects(
+            startDeviceAuthorization(clientId, { fetchImpl: async () => response }),
+            error => {
+                assert.match(error.message, expected);
+                assert.equal(error.message.includes('private-device-code'), false);
+                assert.equal(error.message.includes('private-secret'), false);
+                assert.equal(error.message.includes('private-token'), false);
+                return true;
+            }
+        );
+    }
 });
 
 test('repository and branch API requests use only their selected account token', async () => {
