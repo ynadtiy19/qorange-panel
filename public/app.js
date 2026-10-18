@@ -22,7 +22,12 @@ async function request(url, options = {}) {
     }
     const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
+    if (!response.ok) {
+        const error = new Error(data.error || `请求失败（${response.status}）`);
+        error.status = response.status;
+        error.code = data.code;
+        throw error;
+    }
     return data;
 }
 
@@ -329,9 +334,30 @@ async function runAction(action, service) {
             body: JSON.stringify({ action })
         });
         if (action === 'logs') $('#logs-content').textContent = result.logs || '没有日志输出。';
-        else showNotice(action === 'delete' ? `已删除 ${service.name}。` : result.logs || '操作已完成。');
+        else showNotice(action === 'delete'
+            ? result.containerPreserved
+                ? `已移除 ${service.name} 的 QOrange 记录和环境变量；同名非托管容器保持原样。`
+                : `已删除 ${service.name}。`
+            : result.logs || '操作已完成。');
         await loadSystem();
     } catch (error) {
+        if (action === 'delete' && error.code === 'UNOWNED_CONTAINER' &&
+            window.confirm(`检测到同名容器不是由 QOrange 管理。确认后仅移除 ${service.name} 的 QOrange 服务记录和已保存环境变量；不会停止或删除该容器，它会继续运行且之后需要手动管理。继续？`)) {
+            try {
+                const result = await request(`/api/services/${encodeURIComponent(service.id)}/action`, {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
+                });
+                showNotice(result.containerPreserved
+                    ? `已移除 ${service.name} 的 QOrange 记录和环境变量；同名非托管容器保持原样。`
+                    : `已删除 ${service.name}。`);
+                await loadSystem();
+                return;
+            } catch (retryError) {
+                showNotice(retryError.message, true);
+                return;
+            }
+        }
         if (action === 'logs') $('#logs-content').textContent = error.message;
         else showNotice(error.message, true);
         if (action === 'build') await loadSystem();

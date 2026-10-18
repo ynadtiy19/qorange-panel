@@ -610,10 +610,55 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const protectedContainerDelete = await deleteService('protected');
     const protectedContainerDeleteText = await protectedContainerDelete.text();
     assert.equal(protectedContainerDelete.status, 409, protectedContainerDeleteText);
+    assert.equal(JSON.parse(protectedContainerDeleteText).code, 'UNOWNED_CONTAINER');
     deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
     assert.equal(deleteRecords.some(service => service.id === 'protected'), true);
     assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), true);
     assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+
+    fs.writeFileSync(dockerLog, '');
+    const confirmedUnownedContainerDelete = await fetch(`${baseUrl}/api/services/protected/action`, {
+        method: 'POST',
+        headers: {
+            Cookie: cookie,
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': loginBody.csrfToken
+        },
+        body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
+    });
+    const confirmedUnownedContainerDeleteText = await confirmedUnownedContainerDelete.text();
+    assert.equal(confirmedUnownedContainerDelete.status, 200, confirmedUnownedContainerDeleteText);
+    assert.equal(JSON.parse(confirmedUnownedContainerDeleteText).containerPreserved, true);
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'protected'), false);
+    assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), false);
+    assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+
+    fs.writeFileSync(dockerLog, '');
+    process.env.FAKE_DOCKER_OWNER = 'racing-owned';
+    process.env.FAKE_DOCKER_INSPECT = '';
+    registerForDeleteTest('racing-owned');
+    const ownershipChangedDelete = await fetch(`${baseUrl}/api/services/racing-owned/action`, {
+        method: 'POST',
+        headers: {
+            Cookie: cookie,
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': loginBody.csrfToken
+        },
+        body: JSON.stringify({ action: 'delete', preserveUnownedContainer: true })
+    });
+    const ownershipChangedDeleteText = await ownershipChangedDelete.text();
+    assert.equal(ownershipChangedDelete.status, 409, ownershipChangedDeleteText);
+    assert.match(ownershipChangedDeleteText, /现已由 QOrange 管理/);
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'racing-owned'), true);
+    assert.equal(fs.existsSync(path.join(envDir, 'racing-owned.env')), true);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
 
@@ -628,5 +673,7 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.doesNotMatch(staticContent, /placeholder-view|data-view="(?:ssh|monitoring|status|upgrade|firewall|collaborators|settings)"/);
     const clientScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
     assert.match(clientScript, /const selectedView = view === 'projects' \? 'projects' : 'server'/);
+    assert.match(clientScript, /preserveUnownedContainer: true/);
+    assert.match(clientScript, /不会停止或删除该容器/);
 
 });

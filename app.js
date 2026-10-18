@@ -141,7 +141,9 @@ function safeError(error, secrets = []) {
 function sendOperationError(res, error, secrets = {}) {
     const message = safeError(error, secrets);
     console.error(`Panel operation failed: ${message}`);
-    res.status(error.statusCode || error.status || 500).json({ error: message || '操作失败' });
+    const response = { error: message || '操作失败' };
+    if (error.publicCode) response.code = error.publicCode;
+    res.status(error.statusCode || error.status || 500).json(response);
 }
 
 function setSecurityHeaders(_req, res, next) {
@@ -282,6 +284,7 @@ async function ownedContainerId(name, id) {
         if (!/^[a-f0-9]{64}$/i.test(containerId || '') || panelLabel !== 'true' || serviceLabel !== id) {
             const error = new Error('同名容器并非由 QOrange 管理，已保持原样且未作更改。请手动检查并重命名或移除该容器后重试；QOrange 不会覆盖非托管容器');
             error.statusCode = 409;
+            error.publicCode = 'UNOWNED_CONTAINER';
             throw error;
         }
         return containerId;
@@ -756,12 +759,25 @@ app.post('/api/services/:id/action', async (req, res) => {
                 return;
             }
             if (action === 'delete') {
-                const containerId = await ownedContainerId(name, id);
+                const preserveUnownedContainer = req.body && req.body.preserveUnownedContainer === true;
+                let containerId;
+                let preservedUnownedContainer = false;
+                try {
+                    containerId = await ownedContainerId(name, id);
+                } catch (error) {
+                    if (error.publicCode !== 'UNOWNED_CONTAINER' || !preserveUnownedContainer) throw error;
+                    preservedUnownedContainer = true;
+                }
+                if (preserveUnownedContainer && containerId) {
+                    const error = new Error('同名容器现已由 QOrange 管理；未移除服务记录或环境变量。请重新选择普通删除以移除托管容器');
+                    error.statusCode = 409;
+                    throw error;
+                }
                 if (containerId) await removeOwnedContainer(containerId);
                 try { fs.unlinkSync(envFilePath(id)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
                 const services = readServices().filter(item => item.id !== id);
                 writeServices(services);
-                res.json({ success: true });
+                res.json({ success: true, containerPreserved: preservedUnownedContainer });
                 return;
             }
             const containerId = await ownedContainerId(name, id);
