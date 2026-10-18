@@ -131,13 +131,114 @@ async function loadRepositories() {
 async function loadSystem() {
     try {
         const data = await request('/api/system');
-        $('#cpu').textContent = data.cpu;
-        $('#memory').textContent = data.memory;
-        $('#disk').textContent = data.disk;
+        renderSystem(data);
         renderServices(data.services);
     } catch (error) {
         showNotice(error.message, true);
     }
+}
+
+function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '未知';
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor(seconds % 86400 / 3600);
+    const minutes = Math.floor(seconds % 3600 / 60);
+    return days ? `${days} 天 ${hours} 小时` : `${hours} 小时 ${minutes} 分钟`;
+}
+
+function setProgress(id, percent) {
+    const fill = $(`#${id}`);
+    fill.style.width = `${Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0}%`;
+}
+
+function renderSystem(data) {
+    const system = data.system;
+    const cpu = system.cpu;
+    const memory = system.memory;
+    const disk = system.disk;
+    $('#hostname').textContent = system.hostname || '未知主机';
+    $('#os-summary').textContent = `${system.platform || '未知系统'} · ${system.architecture || '未知架构'}`;
+    $('#panel-status').textContent = data.panel.status === 'running' ? '面板运行中' : `面板${data.panel.status}`;
+    $('#panel-health').textContent = data.panel.status === 'running' ? '运行正常' : data.panel.status;
+    $('#uptime').textContent = `运行时间 ${formatDuration(system.uptimeSeconds)}`;
+
+    $('#cpu-usage').textContent = cpu.usagePercent === null ? '采样中' : `${cpu.usagePercent}%`;
+    $('#cpu-detail').textContent = `${cpu.model} · ${cpu.cores} 核`;
+    $('#cpu-load').textContent = `系统负载 ${cpu.loadAverage.map(value => Number(value).toFixed(2)).join(' / ')}`;
+    setProgress('cpu-progress', cpu.usagePercent);
+
+    $('#memory-usage').textContent = memory.percent === null ? '未知' : `${memory.percent}%`;
+    $('#memory-detail').textContent = `${memory.used} / ${memory.total}`;
+    setProgress('memory-progress', memory.percent);
+
+    $('#disk-usage').textContent = disk.percent === null ? '未知' : `${disk.percent}%`;
+    $('#disk-detail').textContent = disk.available ? `${disk.used} / ${disk.total}` : disk.error;
+    setProgress('disk-progress', disk.percent);
+
+    const platformNames = { darwin: 'macOS', linux: 'Linux', win32: 'Windows', freebsd: 'FreeBSD' };
+    $('#os-platform').textContent = `${platformNames[system.platform] || system.platform} ${system.osRelease}`;
+    $('#kernel-version').textContent = system.osRelease || '未知';
+    $('#architecture').textContent = system.architecture || '未知';
+    $('#cpu-model').textContent = cpu.model || '未知';
+    $('#cpu-cores').textContent = `${cpu.cores} 核`;
+    $('#ipv4-addresses').textContent = system.ipv4Addresses.length ? system.ipv4Addresses.join('、') : '未检测到';
+
+    const dockerOnline = data.docker.status === 'running';
+    $('#docker-status').textContent = dockerOnline ? '运行中' : data.docker.error || '未知';
+    $('#docker-version').textContent = data.docker.version || '未知';
+    $('#docker-dot').classList.toggle('online', dockerOnline);
+    renderManagedContainers(data.managedContainers, data.docker.status);
+}
+
+function renderManagedContainers(containers, dockerStatus) {
+    const list = $('#managed-containers');
+    list.replaceChildren();
+    const empty = $('#empty-managed');
+    empty.hidden = containers.length > 0;
+    empty.textContent = dockerStatus === 'running'
+        ? '尚未检测到 QOrange 托管容器。'
+        : 'Docker 状态未知，暂时无法读取托管容器。';
+    for (const container of containers) {
+        const row = document.createElement('article');
+        row.className = 'managed-row';
+        const identity = document.createElement('div');
+        identity.className = 'managed-identity';
+        const name = document.createElement('strong');
+        name.textContent = container.name;
+        const status = document.createElement('span');
+        status.className = `status ${container.running ? 'running' : 'stopped'}`;
+        status.textContent = container.status;
+        identity.append(name, status);
+        const ports = document.createElement('code');
+        ports.textContent = container.ports || '未映射';
+        row.append(identity, ports);
+        list.append(row);
+    }
+}
+
+const viewLabels = {
+    server: '服务器信息',
+    projects: '项目',
+    ssh: 'SSH',
+    monitoring: '监控',
+    status: '状态',
+    upgrade: '升级',
+    firewall: '防火墙',
+    collaborators: '协作者',
+    settings: '设置'
+};
+
+function selectView(view) {
+    const supported = view === 'server' || view === 'projects';
+    $('#server-view').hidden = view !== 'server';
+    $('#projects-view').hidden = view !== 'projects';
+    $('#placeholder-view').hidden = supported;
+    if (!supported) $('#placeholder-title').textContent = `${viewLabels[view] || '此功能'} · 暂未支持`;
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        const selected = tab.dataset.view === view;
+        tab.classList.toggle('active', selected);
+        tab.setAttribute('aria-selected', String(selected));
+    });
 }
 
 function actionButton(label, action, service, className = 'button subtle') {
@@ -171,7 +272,8 @@ function renderServices(services) {
             uninstalled: '未部署',
             deploying: '部署中',
             failed: '部署失败',
-            missing: '容器不存在'
+            missing: '容器不存在',
+            unknown: '状态未知'
         };
         status.textContent = labels[service.status] || service.statusRaw;
         title.append(name, status);
@@ -183,7 +285,7 @@ function renderServices(services) {
         }
         const meta = document.createElement('div');
         meta.className = 'service-meta';
-        meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · 端口 ${service.port}` : ''}`;
+        meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · 端口 ${service.port}` : ''}${service.containerPorts ? ` · Docker ${service.containerPorts}` : ''}`;
         const envMeta = document.createElement('div');
         envMeta.className = 'service-meta';
         envMeta.textContent = service.environmentConfigured
@@ -445,6 +547,8 @@ $('#variable-form').addEventListener('submit', async event => {
 });
 
 $('#refresh').addEventListener('click', loadSystem);
+document.querySelectorAll('.nav-tab').forEach(tab => tab.addEventListener('click', () => selectView(tab.dataset.view)));
+$('#return-server').addEventListener('click', () => selectView('server'));
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => {
     const dialog = button.closest('dialog');
     if (dialog === serviceDialog) $('#env-text').value = '';
@@ -468,7 +572,7 @@ async function start() {
         }
         csrfToken = session.csrfToken;
         showDashboard();
-        setInterval(loadSystem, 15000);
+        setInterval(loadSystem, 30000);
     } catch (error) {
         loginView.hidden = false;
         $('#login-error').textContent = error.message;

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node app.js",
     "test": "node --test",
-    "check": "node --check app.js && node --check lib/core.js && node --check lib/github.js && node --check lib/auth.js && node --check public/app.js && node --check scripts/create-auth.js && node --check scripts/migrate-legacy.js"
+    "check": "node --check app.js && node --check lib/core.js && node --check lib/system.js && node --check lib/github.js && node --check lib/auth.js && node --check public/app.js && node --check scripts/create-auth.js && node --check scripts/migrate-legacy.js"
   },
   "dependencies": {
     "express": "^4.19.2"
