@@ -173,8 +173,11 @@
 
     <dialog id="environment-dialog" class="modal">
         <div class="modal-heading">
-            <div><h2 id="environment-title">环境变量</h2><p class="muted">值仅保存在服务器上；此处只显示名称和掩码，无法读取原值。保存更改后，需重新构建并部署才会应用到运行中的容器。</p></div>
-            <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+            <div><h2 id="environment-title">环境变量</h2><p class="muted">默认隐藏原值；管理员可按需显示、复制或编辑。保存更改后，需重新构建并部署才会应用到运行中的容器。</p></div>
+            <div class="environment-heading-actions">
+                <button id="edit-raw-environment" type="button" class="button subtle">编辑原始环境变量</button>
+                <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+            </div>
         </div>
         <div class="environment-table" role="table" aria-label="已保存的环境变量">
             <div class="environment-table-heading" role="row">
@@ -184,7 +187,7 @@
             <p id="environment-empty" class="empty-state" hidden>尚未配置环境变量。</p>
         </div>
         <div class="modal-actions">
-            <button id="replace-all-environment" type="button" class="button subtle">批量替换全部变量</button>
+            <button id="copy-all-environment" type="button" class="button subtle">复制全部变量</button>
             <button id="add-environment-variable" type="button" class="button primary">添加变量</button>
             <button type="button" class="button subtle" data-close>关闭</button>
         </div>
@@ -197,7 +200,7 @@
                 <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
             </div>
             <label>变量名称<input id="variable-key" autocomplete="off" required pattern="[A-Za-z_][A-Za-z0-9_]*"></label>
-            <label>变量值<input id="variable-value" type="password" autocomplete="new-password" placeholder="留空表示空值"></label>
+            <label>变量值<textarea id="variable-value" rows="3" spellcheck="false" placeholder="留空表示空值"></textarea></label>
             <p id="variable-error" class="error" role="alert"></p>
             <div class="modal-actions">
                 <button type="button" class="button subtle" data-close>取消</button>

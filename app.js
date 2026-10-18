@@ -587,6 +587,36 @@ app.get('/api/services/:id/env', (req, res) => {
     }
 });
 
+app.post('/api/services/:id/env/reveal', (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const key = req.body && req.body.key;
+        if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+            return res.status(400).json({ error: '环境变量名称无效' });
+        }
+        const env = readServiceEnvIfPresent(id);
+        if (!Object.hasOwn(env, key)) return res.status(404).json({ error: '未找到该环境变量' });
+        res.json({ value: env[key] });
+    } catch {
+        console.error('Environment secret reveal failed');
+        res.status(500).json({ error: '无法读取环境变量' });
+    }
+});
+
+app.post('/api/services/:id/env/export', (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const env = readServiceEnvIfPresent(id);
+        const text = Object.entries(env).map(([key, value]) => `${key}=${value}`).join('\n');
+        res.json({ env: text ? `${text}\n` : '' });
+    } catch {
+        console.error('Environment secret export failed');
+        res.status(500).json({ error: '无法导出环境变量' });
+    }
+});
+
 app.post('/api/services/:id/env', async (req, res) => {
     try {
         const id = validateServiceId(req.params.id);
