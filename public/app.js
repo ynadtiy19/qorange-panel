@@ -18,7 +18,7 @@ async function request(url, options = {}) {
     }
     const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
     return data;
 }
 
@@ -36,16 +36,16 @@ function parseEnvText(text) {
         if (!line.trim() || line.trimStart().startsWith('#')) return;
         const separator = line.indexOf('=');
         if (separator < 1) {
-            errors.push(`Line ${index + 1}: use KEY=VALUE.`);
+            errors.push(`第 ${index + 1} 行：请使用 KEY=VALUE 格式。`);
             return;
         }
         const key = line.slice(0, separator).trim();
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-            errors.push(`Line ${index + 1}: invalid variable name.`);
+            errors.push(`第 ${index + 1} 行：变量名称无效。`);
             return;
         }
         if (keys.has(key)) {
-            errors.push(`Line ${index + 1}: duplicate variable name.`);
+            errors.push(`第 ${index + 1} 行：变量名称重复。`);
             return;
         }
         keys.add(key);
@@ -64,15 +64,15 @@ function renderEnvRows() {
         row.className = 'env-row';
         const key = document.createElement('input');
         key.value = entry.key;
-        key.setAttribute('aria-label', `Environment variable name ${index + 1}`);
+        key.setAttribute('aria-label', `第 ${index + 1} 个环境变量名称`);
         const value = document.createElement('input');
         value.value = entry.value;
         value.type = 'text';
-        value.setAttribute('aria-label', `Environment variable value ${index + 1}`);
+        value.setAttribute('aria-label', `第 ${index + 1} 个环境变量值`);
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.textContent = '×';
-        remove.setAttribute('aria-label', `Remove ${entry.key}`);
+        remove.setAttribute('aria-label', `移除 ${entry.key}`);
         const updateText = () => {
             const next = parseEnvText($('#env-text').value).entries;
             if (next[index]) next[index] = { key: key.value, value: value.value };
@@ -100,27 +100,27 @@ function resetServiceDialog() {
     $('#env-error').textContent = '';
     $('#service-fields').hidden = false;
     $('#repo').required = true;
-    $('#env-hint').textContent = 'Values are saved in a private file on the server and are never shown again.';
-    $('#service-dialog-title').textContent = 'Import repository';
-    $('#service-dialog-description').textContent = 'Choose a GitHub repository. Its default branch will be detected automatically.';
-    $('#save-service').textContent = 'Save service';
+    $('#env-hint').textContent = '变量将保存在服务器的私有文件中，保存后不会再次显示。';
+    $('#service-dialog-title').textContent = '导入仓库';
+    $('#service-dialog-description').textContent = '选择一个 GitHub 仓库，系统会自动检测其默认分支。';
+    $('#save-service').textContent = '保存服务';
 }
 
 async function loadRepositories() {
     const select = $('#repo');
-    select.replaceChildren(new Option('Loading repositories…', ''));
+    select.replaceChildren(new Option('正在加载仓库…', ''));
     try {
         const data = await request('/api/github/info');
         repositories = data.repos || [];
-        $('#github-user').textContent = `GitHub: ${data.user.login}`;
+        $('#github-user').textContent = `GitHub：${data.user.login}`;
         $('#github-user').hidden = false;
-        select.replaceChildren(new Option('Choose a repository', ''));
+        select.replaceChildren(new Option('请选择仓库', ''));
         repositories.forEach((repo, index) => {
             select.add(new Option(`${repo.isPrivate ? '🔒' : '🌐'} ${repo.nameWithOwner}`, String(index)));
         });
     } catch (error) {
-        select.replaceChildren(new Option('Could not load repositories', ''));
-        showNotice(`GitHub CLI: ${error.message}. Install gh and run gh auth login on the server.`, true);
+        select.replaceChildren(new Option('无法加载仓库', ''));
+        showNotice(`GitHub CLI：${error.message}。请在服务器上安装 gh 并运行 gh auth login。`, true);
     }
 }
 
@@ -161,23 +161,23 @@ function renderServices(services) {
         name.textContent = service.name;
         const status = document.createElement('span');
         status.className = `status ${service.status}`;
-        status.textContent = service.status === 'running' ? 'Running' : service.status === 'stopped' ? 'Stopped' : service.statusRaw;
+        status.textContent = service.status === 'running' ? '运行中' : service.status === 'stopped' ? '已停止' : service.status === 'uninstalled' ? '未部署' : service.statusRaw;
         title.append(name, status);
         const meta = document.createElement('div');
         meta.className = 'service-meta';
-        meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · port ${service.port}` : ''}`;
+        meta.textContent = `${service.id} · ${service.repo} · ${service.branch}${service.port ? ` · 端口 ${service.port}` : ''}`;
         info.append(title, meta);
         const actions = document.createElement('div');
         actions.className = 'service-actions';
-        actions.append(actionButton('Build & deploy', 'build', service, 'button primary'));
+        actions.append(actionButton('构建并部署', 'build', service, 'button primary'));
         if (service.status === 'running') {
-            actions.append(actionButton('Restart', 'restart', service), actionButton('Stop', 'stop', service));
+            actions.append(actionButton('重启', 'restart', service), actionButton('停止', 'stop', service));
         } else if (service.status === 'stopped') {
-            actions.append(actionButton('Start', 'start', service));
+            actions.append(actionButton('启动', 'start', service));
         }
-        actions.append(actionButton('Environment', 'environment', service));
-        if (service.status !== 'uninstalled') actions.append(actionButton('Logs', 'logs', service));
-        const remove = actionButton('Delete', 'delete', service, 'button danger');
+        actions.append(actionButton('环境变量', 'environment', service));
+        if (service.status !== 'uninstalled') actions.append(actionButton('日志', 'logs', service));
+        const remove = actionButton('删除', 'delete', service, 'button danger');
         actions.append(remove);
         top.append(info, actions);
         card.append(top);
@@ -191,28 +191,29 @@ async function runAction(action, service) {
         editServiceId = service.id;
         $('#service-fields').hidden = true;
         $('#repo').required = false;
-        $('#service-dialog-title').textContent = `Replace environment · ${service.name}`;
-        $('#service-dialog-description').textContent = 'Existing values are never retrieved or displayed. Enter the complete replacement set; an empty list clears all variables.';
-        $('#env-hint').textContent = 'Only the values entered here will be stored. All values are hidden after saving.';
-        $('#save-service').textContent = 'Replace environment';
+        $('#service-dialog-title').textContent = `替换环境变量 · ${service.name}`;
+        $('#service-dialog-description').textContent = '系统不会读取或显示现有值。请输入完整的新变量列表；留空将清除所有变量。';
+        $('#env-hint').textContent = '仅保存此处输入的变量值，保存后将全部隐藏。';
+        $('#save-service').textContent = '替换环境变量';
         serviceDialog.showModal();
         return;
     }
-    if (action === 'delete' && !window.confirm(`Delete ${service.name}? Its managed container and private environment file will be removed. Repository source and images are left untouched.`)) return;
+    if (action === 'delete' && !window.confirm(`确定删除 ${service.name} 吗？其托管容器和私有环境变量文件将被移除，仓库源代码和镜像不会受影响。`)) return;
     if (action === 'logs') {
-        $('#logs-title').textContent = `Logs · ${service.name}`;
-        $('#logs-content').textContent = 'Loading…';
+        $('#logs-title').textContent = `日志 · ${service.name}`;
+        $('#logs-content').textContent = '正在加载…';
         logsDialog.showModal();
     } else {
-        showNotice(`${action === 'build' ? 'Deployment' : action} in progress for ${service.name}…`);
+        const actionName = { build: '部署', restart: '重启', stop: '停止', start: '启动', delete: '删除' }[action] || action;
+        showNotice(`正在为 ${service.name} 执行${actionName}操作…`);
     }
     try {
         const result = await request(`/api/services/${encodeURIComponent(service.id)}/action`, {
             method: 'POST',
             body: JSON.stringify({ action })
         });
-        if (action === 'logs') $('#logs-content').textContent = result.logs || 'No output.';
-        else showNotice(action === 'delete' ? `${service.name} deleted.` : result.logs || `${action} completed.`);
+        if (action === 'logs') $('#logs-content').textContent = result.logs || '没有日志输出。';
+        else showNotice(action === 'delete' ? `已删除 ${service.name}。` : result.logs || '操作已完成。');
         await loadSystem();
     } catch (error) {
         if (action === 'logs') $('#logs-content').textContent = error.message;
@@ -272,10 +273,10 @@ $('#service-form').addEventListener('submit', async event => {
     try {
         if (editServiceId) {
             await request(`/api/services/${encodeURIComponent(editServiceId)}/env`, { method: 'PUT', body: JSON.stringify({ env }) });
-            showNotice('Environment variables replaced.');
+            showNotice('环境变量已替换。');
         } else {
             const repo = repositories[Number($('#repo').value)];
-            if (!repo) throw new Error('Choose a GitHub repository.');
+            if (!repo) throw new Error('请选择一个 GitHub 仓库。');
             await request('/api/services', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -287,7 +288,7 @@ $('#service-form').addEventListener('submit', async event => {
                     env
                 })
             });
-            showNotice('Service saved. Build and deploy it when ready.');
+            showNotice('服务已保存。准备就绪后即可构建并部署。');
         }
         $('#env-text').value = '';
         $('#env-rows').replaceChildren();

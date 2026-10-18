@@ -24,9 +24,9 @@ test('parses multiline KEY=VALUE input without splitting values at equals signs'
 });
 
 test('rejects malformed and duplicate environment names without echoing values', () => {
-    assert.throws(() => parseEnv('GOOD=first\nBAD-NAME=do-not-leak'), /Invalid environment variable name on line 2/);
-    assert.throws(() => parseEnv('TOKEN=first\nTOKEN=secret-value'), /Duplicate environment variable name on line 2/);
-    assert.throws(() => parseEnv('this is secret'), /use KEY=VALUE/);
+    assert.throws(() => parseEnv('GOOD=first\nBAD-NAME=do-not-leak'), /第 2 行的环境变量名称无效/);
+    assert.throws(() => parseEnv('TOKEN=first\nTOKEN=secret-value'), /第 2 行的环境变量名称重复/);
+    assert.throws(() => parseEnv('this is secret'), /请使用 KEY=VALUE 格式/);
 });
 
 test('validates repository services, ports, branches, and container identifiers', () => {
@@ -44,11 +44,11 @@ test('validates repository services, ports, branches, and container identifiers'
         port: '8080:3000'
     });
     assert.equal(containerName('website_1'), 'qorange-website_1');
-    assert.throws(() => validateServiceId('$(touch-pwned)'), /Service ID/);
-    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'https://github.com/org/repo', branch: 'main' }), /Select a repository/);
-    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: '../main' }), /Branch name/);
-    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: 'main', port: '8080;id' }), /Port must/);
-    assert.throws(() => validateBranch('-option'), /Branch name/);
+    assert.throws(() => validateServiceId('$(touch-pwned)'), /服务 ID/);
+    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'https://github.com/org/repo', branch: 'main' }), /请从已登录的 GitHub 账户/);
+    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: '../main' }), /分支名称/);
+    assert.throws(() => validateService({ id: 'app', name: 'App', repo: 'org/repo', branch: 'main', port: '8080;id' }), /端口必须/);
+    assert.throws(() => validateBranch('-option'), /分支名称/);
 });
 
 test('redacts environment values from output', () => {
@@ -114,4 +114,30 @@ test('installer syntax and safety guards preserve MongoDB and user app data', ()
     assert.match(source, /# QOrange Panel managed/);
     assert.match(source, /systemctl show -p FragmentPath/);
     assert.doesNotMatch(source, /rm\s+-rf\s+\/data\/apps/);
+    assert.match(source, /if \[\[ ! -e "\$PANEL_ENV" \]\]/);
+    assert.match(source, /for state_file in "\$ETC_DIR\/session\.key" "\$ETC_DIR\/auth\.json"/);
+    assert.match(source, /GH_CLI_PATH=%s/);
+});
+
+test('updater validates the existing installation and retains rollback and user state', () => {
+    const updater = path.join(__dirname, '..', 'update.sh');
+    const syntax = spawnSync('bash', ['-n', updater], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+    const source = fs.readFileSync(updater, 'utf8');
+    assert.match(source, /\/opt\/qorange-panel\.rollback\./);
+    assert.match(source, /restoring the previous application files/);
+    assert.match(source, /"\$ETC_DIR\/auth\.json"/);
+    assert.match(source, /"\$ETC_DIR\/session\.key"/);
+    assert.match(source, /"\$ETC_DIR\/panel\.env"/);
+    assert.doesNotMatch(source, /create-auth\.js/);
+    assert.doesNotMatch(source, /rm\s+-rf\s+\/data\/apps/);
+    assert.match(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), /process\.env\.GH_CLI_PATH/);
+});
+
+test('panel HTML declares Simplified Chinese and translated interface labels', () => {
+    const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    assert.match(page, /<html lang="zh-CN">/);
+    assert.match(page, /管理员密码/);
+    assert.match(page, /导入 GitHub 仓库/);
+    assert.match(page, /环境变量/);
 });
