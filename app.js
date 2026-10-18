@@ -13,6 +13,7 @@ const {
     validateService,
     validateServiceId,
     containerName,
+    resolveServiceStatus,
     redactSecrets
 } = require('./lib/core');
 const {
@@ -36,6 +37,7 @@ const SERVICE_FILE = path.join(DATA_DIR, 'services.json');
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const MAX_ENV_BYTES = 64 * 1024;
 const GH_CLI_PATH = process.env.GH_CLI_PATH || 'gh';
+const DOCKER_CLI_PATH = process.env.DOCKER_CLI_PATH || 'docker';
 const loginAttempts = new Map();
 const serviceOperations = new Map();
 let previousCpuTimes = null;
@@ -81,6 +83,29 @@ function envFilePath(id) {
 function readServiceEnv(id) {
     const text = fs.readFileSync(envFilePath(id), 'utf8');
     return parseEnv(text);
+}
+
+function readServiceEnvIfPresent(id) {
+    try {
+        return readServiceEnv(id);
+    } catch (error) {
+        if (error.code === 'ENOENT') return {};
+        throw error;
+    }
+}
+
+function environmentMetadata(id) {
+    const count = Object.keys(readServiceEnvIfPresent(id)).length;
+    return { environmentConfigured: count > 0, environmentVariableCount: count };
+}
+
+function setEnvironmentValue(env, key, value) {
+    Object.defineProperty(env, key, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true
+    });
 }
 
 function writeServiceEnv(id, envText) {
@@ -223,7 +248,7 @@ async function githubInfo() {
 
 async function assertOwnedContainer(name, id) {
     try {
-        const result = await runFile('docker', [
+        const result = await runFile(DOCKER_CLI_PATH, [
             'inspect', '--format',
             '{{ index .Config.Labels "com.qorange.panel" }}|{{ index .Config.Labels "com.qorange.service" }}',
             name
@@ -276,7 +301,7 @@ async function performDeploy(service) {
         await downloadGithubArchive(GH_CLI_PATH, endpoint, archive, { secrets });
         await runFile('tar', ['-xzf', archive, '-C', source, '--strip-components=1'], { timeout: 5 * 60 * 1000 });
         logs.push('正在构建应用镜像。');
-        const build = await runFile('docker', [
+        const build = await runFile(DOCKER_CLI_PATH, [
             'build', '--tag', `qorange-${service.id}:latest`,
             '--label', 'com.qorange.panel=true',
             '--label', `com.qorange.service=${service.id}`,
@@ -287,8 +312,8 @@ async function performDeploy(service) {
 
         const exists = await assertOwnedContainer(name, service.id);
         if (exists) {
-            await runFile('docker', ['stop', name], { timeout: 60000 });
-            await runFile('docker', ['rm', name], { timeout: 60000 });
+            await runFile(DOCKER_CLI_PATH, ['stop', name], { timeout: 60000 });
+            await runFile(DOCKER_CLI_PATH, ['rm', name], { timeout: 60000 });
         }
         const args = ['run', '-d', '--name', name, '--restart', 'unless-stopped',
             '--label', 'com.qorange.panel=true',
@@ -296,12 +321,26 @@ async function performDeploy(service) {
         if (service.port) args.push('--publish', service.port);
         if (Object.keys(env).length) args.push('--env-file', envFilePath(service.id));
         args.push(`qorange-${service.id}:latest`);
-        const run = await runFile('docker', args, { timeout: 60000 });
+        const run = await runFile(DOCKER_CLI_PATH, args, { timeout: 60000 });
         logs.push(`容器已启动：${run.stdout.trim()}`);
         return limitOutput(redactSecrets(logs.join('\n'), secrets));
     } finally {
         fs.rmSync(workspace, { recursive: true, force: true });
     }
+}
+
+function updateDeploymentState(id, status) {
+    const services = readServices();
+    const service = services.find(item => item.id === id);
+    if (!service) throw new Error('未找到该服务，无法保存部署状态');
+    const previous = service.deployment && typeof service.deployment === 'object' ? service.deployment : {};
+    const now = new Date().toISOString();
+    service.deployment = {
+        status,
+        lastAttemptAt: status === 'deploying' ? now : (previous.lastAttemptAt || now),
+        lastSuccessAt: status === 'succeeded' ? now : (previous.lastSuccessAt || null)
+    };
+    writeServices(services);
 }
 
 app.disable('x-powered-by');
@@ -358,15 +397,33 @@ app.get('/api/github/info', async (_req, res) => {
 app.get('/api/system', async (_req, res) => {
     try {
         const [dockerResult, diskResult] = await Promise.all([
-            runFile('docker', ['ps', '-a', '--filter', 'label=com.qorange.panel=true', '--format', '{{.Names}}\t{{.Status}}']),
+            runFile(DOCKER_CLI_PATH, ['ps', '-a', '--filter', 'label=com.qorange.panel=true', '--format', '{{.Names}}\t{{.Status}}']),
             runFile('df', ['-Pk', '/'], { timeout: 15000 })
         ]);
         const containerMap = new Map(dockerResult.stdout.trim().split('\n').filter(Boolean).map(line => {
             const [name, status] = line.split('\t');
             return [name, status];
         }));
-        const services = readServices().map(service => {
-            const statusRaw = containerMap.get(containerName(service.id)) || 'Not deployed';
+        const registeredServices = readServices();
+        let registryChanged = false;
+        const services = registeredServices.map(service => {
+            let deployment = service.deployment && typeof service.deployment === 'object'
+                ? service.deployment
+                : { status: 'never', lastAttemptAt: null, lastSuccessAt: null };
+            if (deployment.status === 'deploying' && !serviceOperations.has(service.id)) {
+                deployment = {
+                    status: 'failed',
+                    lastAttemptAt: deployment.lastAttemptAt || null,
+                    lastSuccessAt: deployment.lastSuccessAt || null
+                };
+                service.deployment = deployment;
+                registryChanged = true;
+            }
+            const statusRaw = containerMap.get(containerName(service.id)) || null;
+            const deploymentStatus = ['deploying', 'succeeded', 'failed'].includes(deployment.status)
+                ? deployment.status
+                : 'never';
+            const hasContainer = statusRaw !== null;
             return {
                 id: service.id,
                 name: service.name,
@@ -374,10 +431,16 @@ app.get('/api/system', async (_req, res) => {
                 branch: service.branch,
                 port: service.port,
                 type: 'app',
-                status: statusRaw === 'Not deployed' ? 'uninstalled' : statusRaw.startsWith('Up') ? 'running' : 'stopped',
-                statusRaw
+                status: resolveServiceStatus(statusRaw, deploymentStatus, serviceOperations.has(service.id)),
+                statusRaw: statusRaw || 'Not deployed',
+                deploymentStatus,
+                lastDeploymentAttemptAt: deployment.lastAttemptAt || null,
+                lastSuccessfulDeploymentAt: deployment.lastSuccessAt || null,
+                hasContainer,
+                ...environmentMetadata(service.id)
             };
         });
+        if (registryChanged) writeServices(registeredServices);
         const memoryTotal = os.totalmem();
         const memoryUsed = memoryTotal - os.freemem();
         const memory = `${Math.round(memoryUsed / 1024 / 1024)}/${Math.round(memoryTotal / 1024 / 1024)} MB (${Math.round(memoryUsed * 100 / memoryTotal)}%)`;
@@ -394,8 +457,10 @@ app.post('/api/services', async (req, res) => {
         const input = req.body || {};
         const service = validateService(input);
         const services = readServices();
-        if (services.some(item => item.id === service.id)) return res.status(409).json({ error: '服务 ID 已存在' });
-        if (fs.existsSync(envFilePath(service.id))) return res.status(409).json({ error: '该服务 ID 对应的环境变量文件已存在' });
+        if (services.some(item => item.id === service.id)) {
+            return res.status(409).json({ error: '服务 ID 已存在；请使用列表中的现有服务，不要重复导入。' });
+        }
+        if (fs.existsSync(envFilePath(service.id))) return res.status(409).json({ error: '该服务 ID 对应的环境变量文件已存在，未覆盖任何数据。' });
         if (input.env !== undefined && typeof input.env !== 'string') return res.status(400).json({ error: '环境变量必须是文本' });
         writeServiceEnv(service.id, input.env || '');
         try {
@@ -425,6 +490,98 @@ app.put('/api/services/:id/env', async (req, res) => {
     }
 });
 
+app.get('/api/services/:id/env', (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const env = readServiceEnvIfPresent(id);
+        const environmentVariableCount = Object.keys(env).length;
+        res.json({
+            environmentConfigured: environmentVariableCount > 0,
+            environmentVariableCount,
+            variables: Object.entries(env).map(([key, value]) => ({
+                key,
+                maskedValue: value.length ? '••••••' : '',
+                valuePresent: value.length > 0,
+                private: true
+            }))
+        });
+    } catch (error) {
+        res.status(error.code === 'ENOENT' ? 404 : 400).json({ error: safeError(error) });
+    }
+});
+
+app.post('/api/services/:id/env', async (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const body = req.body || {};
+        const key = typeof body.key === 'string' ? body.key : '';
+        const value = body.value;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return res.status(400).json({ error: '环境变量名称无效' });
+        if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_ENV_BYTES || /[\r\n\u0000]/.test(value)) {
+            return res.status(400).json({ error: '环境变量值必须是单行且小于 64 KB 的文本' });
+        }
+        await withServiceLock(id, () => {
+            const env = readServiceEnvIfPresent(id);
+            if (Object.hasOwn(env, key)) return res.status(409).json({ error: '该环境变量已存在，请使用更新操作。' });
+            setEnvironmentValue(env, key, value);
+            const envText = Object.entries(env).map(([name, item]) => `${name}=${item}`).join('\n');
+            if (Buffer.byteLength(envText, 'utf8') > MAX_ENV_BYTES) {
+                return res.status(400).json({ error: '全部环境变量必须小于 64 KB' });
+            }
+            writeServiceEnv(id, envText);
+            res.status(201).json({ success: true });
+        });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.put('/api/services/:id/env/:key', async (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const key = req.params.key;
+        const value = (req.body || {}).value;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return res.status(400).json({ error: '环境变量名称无效' });
+        if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_ENV_BYTES || /[\r\n\u0000]/.test(value)) {
+            return res.status(400).json({ error: '环境变量值必须是单行且小于 64 KB 的文本' });
+        }
+        await withServiceLock(id, () => {
+            const env = readServiceEnvIfPresent(id);
+            if (!Object.hasOwn(env, key)) return res.status(404).json({ error: '未找到该环境变量' });
+            setEnvironmentValue(env, key, value);
+            const envText = Object.entries(env).map(([name, item]) => `${name}=${item}`).join('\n');
+            if (Buffer.byteLength(envText, 'utf8') > MAX_ENV_BYTES) {
+                return res.status(400).json({ error: '全部环境变量必须小于 64 KB' });
+            }
+            writeServiceEnv(id, envText);
+            res.json({ success: true });
+        });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
+app.delete('/api/services/:id/env/:key', async (req, res) => {
+    try {
+        const id = validateServiceId(req.params.id);
+        if (!readServices().some(service => service.id === id)) return res.status(404).json({ error: '未找到该服务' });
+        const key = req.params.key;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return res.status(400).json({ error: '环境变量名称无效' });
+        await withServiceLock(id, () => {
+            const env = readServiceEnvIfPresent(id);
+            if (!Object.hasOwn(env, key)) return res.status(404).json({ error: '未找到该环境变量' });
+            delete env[key];
+            writeServiceEnv(id, Object.entries(env).map(([name, value]) => `${name}=${value}`).join('\n'));
+            res.json({ success: true });
+        });
+    } catch (error) {
+        sendOperationError(res, error);
+    }
+});
+
 app.post('/api/services/:id/action', async (req, res) => {
     const id = req.params.id;
     let secrets = [];
@@ -440,15 +597,26 @@ app.post('/api/services/:id/action', async (req, res) => {
             secrets = readServiceEnv(id);
             const name = containerName(id);
             if (action === 'build') {
-                const logs = await performDeploy(service);
-                res.json({ success: true, logs });
+                updateDeploymentState(id, 'deploying');
+                try {
+                    const logs = await performDeploy(service);
+                    updateDeploymentState(id, 'succeeded');
+                    res.json({ success: true, logs });
+                } catch (error) {
+                    try {
+                        updateDeploymentState(id, 'failed');
+                    } catch (stateError) {
+                        throw new Error(`部署失败，且无法保存部署状态：${safeError(stateError, secrets)}`);
+                    }
+                    throw error;
+                }
                 return;
             }
             if (action === 'delete') {
                 const exists = await assertOwnedContainer(name, id);
                 if (exists) {
-                    await runFile('docker', ['stop', name], { timeout: 60000 });
-                    await runFile('docker', ['rm', name], { timeout: 60000 });
+                    await runFile(DOCKER_CLI_PATH, ['stop', name], { timeout: 60000 });
+                    await runFile(DOCKER_CLI_PATH, ['rm', name], { timeout: 60000 });
                 }
                 try { fs.unlinkSync(envFilePath(id)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
                 const services = readServices().filter(item => item.id !== id);
@@ -462,11 +630,11 @@ app.post('/api/services/:id/action', async (req, res) => {
                 return;
             }
             if (action === 'logs') {
-                const result = await runFile('docker', ['logs', '--tail', '200', name], { timeout: 30000 });
+                const result = await runFile(DOCKER_CLI_PATH, ['logs', '--tail', '200', name], { timeout: 30000 });
                 res.json({ logs: limitOutput(redactSecrets(`${result.stdout}${result.stderr}`, serviceSecrets(secrets))) });
                 return;
             }
-            const result = await runFile('docker', [action, name], { timeout: 60000 });
+            const result = await runFile(DOCKER_CLI_PATH, [action, name], { timeout: 60000 });
             res.json({ success: true, logs: limitOutput(redactSecrets(`${result.stdout}${result.stderr}`, serviceSecrets(secrets))) });
         });
     } catch (error) {
