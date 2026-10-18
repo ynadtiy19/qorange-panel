@@ -210,6 +210,7 @@ test('allocates a public host port while preserving explicit overrides and Mongo
 
 test('panel HTML declares Simplified Chinese and translated interface labels', () => {
     const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const client = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
     assert.match(page, /<html lang="zh-CN">/);
     assert.match(page, /管理员密码/);
     assert.match(page, /导入 GitHub 仓库/);
@@ -217,4 +218,11 @@ test('panel HTML declares Simplified Chinese and translated interface labels', (
     assert.match(page, /编辑原始环境变量/);
     assert.match(page, /复制全部变量/);
     assert.match(page, /<textarea id="env-text"/);
+    const serviceSubmit = client.split("$('#service-form').addEventListener('submit'")[1].split('\n});', 1)[0];
+    assert.equal((client.match(/\$\('#github-accounts-button'\)\.addEventListener\('click'/g) || []).length, 1);
+    assert.ok(
+        !serviceSubmit.includes("$('#github-accounts-button')") &&
+        !serviceSubmit.includes("$('#connect-github')"),
+        'GitHub click handlers must not be nested in the service form submit handler'
+    );
 });

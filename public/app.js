@@ -166,14 +166,17 @@ function renderGithubAccounts() {
 }
 
 async function loadGithubAccounts() {
+    $('#github-accounts-status').textContent = '正在加载 GitHub 账号…';
     try {
         const data = await request('/api/github/accounts');
         githubAccounts = data.accounts || [];
         githubClientConfigured = data.clientConfigured;
         $('#connect-github').disabled = !githubClientConfigured;
         $('#github-config-notice').hidden = githubClientConfigured;
+        $('#github-accounts-status').textContent = '';
         renderGithubAccounts();
     } catch (error) {
+        $('#github-accounts-status').textContent = `无法加载 GitHub 账号：${error.message}`;
         showNotice(error.message, true);
     }
 }
@@ -779,36 +782,6 @@ $('#service-form').addEventListener('submit', async event => {
                     env
                 })
             });
-
-            $('#github-accounts-button').addEventListener('click', async () => {
-                $('#github-device-panel').hidden = true;
-                $('#github-device-status').textContent = '';
-                await loadGithubAccounts();
-                $('#github-dialog').showModal();
-            });
-
-            $('#connect-github').addEventListener('click', async () => {
-                const button = $('#connect-github');
-                button.disabled = true;
-                $('#github-device-status').textContent = '正在向 GitHub 请求设备代码…';
-                try {
-                    const authorization = await request('/api/github/device', { method: 'POST', body: '{}' });
-                    const link = $('#github-verification-link');
-                    link.href = authorization.verificationUri;
-                    $('#github-user-code').textContent = authorization.userCode;
-                    $('#github-device-panel').hidden = false;
-                    $('#github-device-status').textContent = `代码有效约 ${Math.ceil(authorization.expiresIn / 60)} 分钟。`;
-                    if (devicePollTimer) clearTimeout(devicePollTimer);
-                    devicePollTimer = setTimeout(
-                        () => pollGithubDevice(authorization.deviceId, authorization.interval),
-                        authorization.interval * 1000
-                    );
-                } catch (error) {
-                    $('#github-device-status').textContent = error.message;
-                } finally {
-                    if ($('#github-device-panel').hidden) button.disabled = !githubClientConfigured;
-                }
-            });
             showNotice('服务已保存。准备就绪后即可构建并部署。');
         }
         $('#env-text').value = '';
@@ -819,6 +792,36 @@ $('#service-form').addEventListener('submit', async event => {
         showNotice(error.message, true);
     } finally {
         saveButton.disabled = false;
+    }
+});
+
+$('#github-accounts-button').addEventListener('click', async () => {
+    $('#github-device-panel').hidden = true;
+    $('#github-device-status').textContent = '';
+    $('#github-dialog').showModal();
+    await loadGithubAccounts();
+});
+
+$('#connect-github').addEventListener('click', async () => {
+    const button = $('#connect-github');
+    button.disabled = true;
+    $('#github-device-status').textContent = '正在向 GitHub 请求设备代码…';
+    try {
+        const authorization = await request('/api/github/device', { method: 'POST', body: '{}' });
+        const link = $('#github-verification-link');
+        link.href = authorization.verificationUri;
+        $('#github-user-code').textContent = authorization.userCode;
+        $('#github-device-panel').hidden = false;
+        $('#github-device-status').textContent = `代码有效约 ${Math.ceil(authorization.expiresIn / 60)} 分钟。`;
+        if (devicePollTimer) clearTimeout(devicePollTimer);
+        devicePollTimer = setTimeout(
+            () => pollGithubDevice(authorization.deviceId, authorization.interval),
+            authorization.interval * 1000
+        );
+    } catch (error) {
+        $('#github-device-status').textContent = error.message;
+    } finally {
+        if ($('#github-device-panel').hidden) button.disabled = !githubClientConfigured;
     }
 });
 
