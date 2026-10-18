@@ -140,10 +140,6 @@ textarea { resize: vertical; min-height: 105px; font: .83rem ui-monospace, SFMon
 .managed-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
 .managed-identity strong { font: .82rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .managed-row code { color: #a8b3c0; font: .76rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; text-align: right; }
-.placeholder-panel { min-height: 340px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; padding: 32px; text-align: center; }
-.placeholder-panel .muted { max-width: 500px; }
-.placeholder-icon { color: #f97316; font-size: 2.2rem; }
-.placeholder-panel .button { margin-top: 8px; }
 .services-panel { margin-top: 0; }
 
 @media (max-width: 700px) {
