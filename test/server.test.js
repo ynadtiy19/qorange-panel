@@ -43,8 +43,14 @@ if (process.argv[2] === 'ps') {
 }
 if (process.argv[2] === 'version') process.stdout.write('27.0.3\\n');
 if (process.argv[2] === 'inspect') {
-    if (process.env.FAKE_DOCKER_INSPECT === 'missing') {
-        process.stderr.write('Error response from daemon: No such container: ' + process.argv[5]);
+    if (process.env.FAKE_DOCKER_IMAGE_ONLY === '1') {
+        process.stdout.write('image-inspect-result-without-container-state\\n');
+        process.exit(0);
+    }
+}
+if (process.argv[2] === 'container' && process.argv[3] === 'inspect') {
+    if (process.env.FAKE_DOCKER_IMAGE_ONLY === '1' || process.env.FAKE_DOCKER_INSPECT === 'missing') {
+        process.stderr.write('Error response from daemon: No such container: ' + process.argv[6]);
         process.exit(1);
     }
     const owner = process.env.FAKE_DOCKER_INSPECT === 'unowned' ||
@@ -632,13 +638,31 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     });
     const dockerLog = path.join(root, 'docker-operations.jsonl');
     process.env.FAKE_DOCKER_LOG = dockerLog;
+    let dockerOperations;
+    const imageOnlyMarker = path.join(root, 'qorange-website-image');
+    fs.writeFileSync(imageOnlyMarker, 'image exists; no container exists');
+    process.env.FAKE_DOCKER_IMAGE_ONLY = '1';
+    const deployWithImageOnly = await buildService();
+    const deployWithImageOnlyText = await deployWithImageOnly.text();
+    assert.equal(deployWithImageOnly.status, 200, deployWithImageOnlyText);
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args.slice(0, 2)), [
+        ['build', '--tag'],
+        ['container', 'inspect'],
+        ['run', '-d']
+    ]);
+    assert.equal(fs.readFileSync(imageOnlyMarker, 'utf8'), 'image exists; no container exists');
+    delete process.env.FAKE_DOCKER_IMAGE_ONLY;
+
+    fs.writeFileSync(dockerLog, '');
     process.env.FAKE_DOCKER_INSPECT = 'missing';
     const deployWithoutExistingContainer = await buildService();
     const deployWithoutExistingContainerText = await deployWithoutExistingContainer.text();
     assert.equal(deployWithoutExistingContainer.status, 200, deployWithoutExistingContainerText);
     successfulDeploymentAt = JSON.parse(fs.readFileSync(deploymentRegistry, 'utf8')).services[0].deployment.lastSuccessAt;
-    let dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'inspect', 'run']);
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'container', 'run']);
+    assert.deepEqual(dockerOperations[1].slice(0, 2), ['container', 'inspect']);
 
     fs.writeFileSync(dockerLog, '');
     delete process.env.FAKE_DOCKER_INSPECT;
@@ -649,7 +673,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(deployAfterContainerDisappears.status, 200, deployAfterContainerDisappearsText);
     successfulDeploymentAt = JSON.parse(fs.readFileSync(deploymentRegistry, 'utf8')).services[0].deployment.lastSuccessAt;
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'inspect', 'stop', 'rm', 'run']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'container', 'stop', 'rm', 'run']);
+    assert.deepEqual(dockerOperations[1].slice(0, 2), ['container', 'inspect']);
     assert.equal(dockerOperations[2][1], 'a'.repeat(64));
     assert.equal(dockerOperations[3][1], 'a'.repeat(64));
     delete process.env.FAKE_DOCKER_STOP_MISSING;
@@ -662,7 +687,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(deployWithUnownedContainer.status, 409, deployWithUnownedContainerText);
     assert.match(deployWithUnownedContainerText, /手动检查并重命名或移除/);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'container']);
+    assert.deepEqual(dockerOperations[1].slice(0, 2), ['container', 'inspect']);
 
     fs.writeFileSync(dockerLog, '');
     const unownedAfterRunPath = path.join(root, 'unowned-after-run');
@@ -674,7 +700,9 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(deployWithRacingUnownedContainer.status, 409, deployWithRacingUnownedContainerText);
     assert.match(deployWithRacingUnownedContainerText, /手动检查并重命名或移除/);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'inspect', 'stop', 'rm', 'run', 'inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['build', 'container', 'stop', 'rm', 'run', 'container']);
+    assert.deepEqual(dockerOperations[1].slice(0, 2), ['container', 'inspect']);
+    assert.deepEqual(dockerOperations[5].slice(0, 2), ['container', 'inspect']);
     assert.equal(fs.existsSync(unownedAfterRunPath), true);
     delete process.env.FAKE_DOCKER_RUN_CONFLICT;
     delete process.env.FAKE_DOCKER_UNOWNED_AFTER_RUN;
@@ -805,6 +833,22 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
         },
         body: JSON.stringify({ action: 'delete' })
     });
+    let deleteRecords;
+    fs.writeFileSync(dockerLog, '');
+    process.env.FAKE_DOCKER_IMAGE_ONLY = '1';
+    registerForDeleteTest('image-only');
+    const imageOnlyDelete = await deleteService('image-only');
+    const imageOnlyDeleteText = await imageOnlyDelete.text();
+    assert.equal(imageOnlyDelete.status, 200, imageOnlyDeleteText);
+    assert.equal(JSON.parse(imageOnlyDeleteText).containerPreserved, false);
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    assert.equal(deleteRecords.some(service => service.id === 'image-only'), false);
+    assert.equal(fs.existsSync(path.join(envDir, 'image-only.env')), false);
+    assert.equal(fs.readFileSync(imageOnlyMarker, 'utf8'), 'image exists; no container exists');
+    dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(dockerOperations.map(args => args.slice(0, 2)), [['container', 'inspect']]);
+    delete process.env.FAKE_DOCKER_IMAGE_ONLY;
+
     fs.writeFileSync(dockerLog, '');
     process.env.FAKE_DOCKER_OWNER = 'orphaned';
     process.env.FAKE_DOCKER_INSPECT = 'missing';
@@ -812,11 +856,12 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     const missingContainerDelete = await deleteService('orphaned');
     const missingContainerDeleteText = await missingContainerDelete.text();
     assert.equal(missingContainerDelete.status, 200, missingContainerDeleteText);
-    let deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
+    deleteRecords = JSON.parse(fs.readFileSync(deploymentRegistryPath, 'utf8')).services;
     assert.equal(deleteRecords.some(service => service.id === 'orphaned'), false);
     assert.equal(fs.existsSync(path.join(envDir, 'orphaned.env')), false);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
+    assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
 
     fs.writeFileSync(dockerLog, '');
     process.env.FAKE_DOCKER_OWNER = 'vanishing';
@@ -831,7 +876,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(deleteRecords.some(service => service.id === 'vanishing'), false);
     assert.equal(fs.existsSync(path.join(envDir, 'vanishing.env')), false);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect', 'stop', 'rm']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container', 'stop', 'rm']);
+    assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
     assert.ok(dockerOperations.slice(1).every(args => args[1] === 'a'.repeat(64)));
     delete process.env.FAKE_DOCKER_STOP_MISSING;
     delete process.env.FAKE_DOCKER_RM_MISSING;
@@ -852,7 +898,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), true);
     assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
+    assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
 
     fs.writeFileSync(dockerLog, '');
     const confirmedUnownedContainerDelete = await fetch(`${baseUrl}/api/services/protected/action`, {
@@ -873,7 +920,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(fs.existsSync(path.join(envDir, 'protected.env')), false);
     assert.equal(fs.readFileSync(path.join(mongoData, 'sentinel'), 'utf8'), 'preserve existing database data');
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
+    assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
 
     fs.writeFileSync(dockerLog, '');
     process.env.FAKE_DOCKER_OWNER = 'racing-owned';
@@ -896,7 +944,8 @@ test('API authentication, origin, CSRF, and secret isolation', async t => {
     assert.equal(deleteRecords.some(service => service.id === 'racing-owned'), true);
     assert.equal(fs.existsSync(path.join(envDir, 'racing-owned.env')), true);
     dockerOperations = fs.readFileSync(dockerLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(dockerOperations.map(args => args[0]), ['inspect']);
+    assert.deepEqual(dockerOperations.map(args => args[0]), ['container']);
+    assert.deepEqual(dockerOperations[0].slice(0, 2), ['container', 'inspect']);
 
     const staticPage = await fetch(`${baseUrl}/`);
     assert.equal(staticPage.status, 200);
